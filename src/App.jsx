@@ -1,17 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { clipById, clipEnd, clipsAt, mediaById, projectDuration, trackById, videoLayers } from "../core/model.js";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { TEXT_STYLES, byId } from "../core/catalog.js";
+import { captionLines } from "../core/captions.js";
+import { clipById, clipEnd, clipsAt, isText, mainTrack, mediaById, projectDuration, sourceAt, trackById, videoLayers } from "../core/model.js";
 import * as ops from "../core/ops.js";
 import ExportDialog from "./components/ExportDialog.jsx";
-import Inspector from "./components/Inspector.jsx";
-import MediaBin from "./components/MediaBin.jsx";
+import Library from "./components/Library.jsx";
 import Player from "./components/Player.jsx";
+import Properties from "./components/Properties.jsx";
 import Timeline from "./components/Timeline.jsx";
 import TopBar from "./components/TopBar.jsx";
 import Welcome from "./components/Welcome.jsx";
+import { EditorContext, EMPTY_SELECTION } from "./editor.js";
 import { PUNCH_DEFAULTS } from "./presets.js";
 import { api, playhead, playing } from "./state.js";
-
-const EMPTY_SELECTION = { clips: [], bleep: null, markers: [] };
 
 export default function App() {
   const [doc, setDoc] = useState(null); // { path, project }
@@ -21,16 +22,22 @@ export default function App() {
   const [selection, setSelection] = useState(EMPTY_SELECTION);
   const [range, setRange] = useState({ in: null, out: null });
   const [proxies, setProxies] = useState({}); // mediaId -> path | { progress }
-  const [waves, setWaves] = useState({}); // mediaId -> { perSecond, peaks }
+  const [waves, setWaves] = useState({});
+  const [strips, setStrips] = useState({});
+  const [jobsState, setJobs] = useState({}); // "kind:id" -> progress
   const [toast, setToast] = useState(null);
   const [exportOpen, setExportOpen] = useState(false);
   const [saveState, setSaveState] = useState("saved");
+  const [tool, setTool] = useState("select");
+  const [snap, setSnap] = useState(true);
+  const [libraryTab, setLibraryTab] = useState("media");
+  const clipboard = useRef(null);
   const dirty = useRef(false);
+  const magnet = doc?.project.settings.magnet ?? true;
+  const magnetRef = useRef(magnet);
+  magnetRef.current = magnet;
 
-  const notify = useCallback((text, kind = "info") => {
-    setToast({ text, kind, id: Date.now() });
-  }, []);
-
+  const notify = useCallback((text, kind = "info") => setToast({ text, kind, id: Date.now() }), []);
   useEffect(() => {
     if (!toast) return;
     const t = setTimeout(() => setToast(null), toast.kind === "error" ? 5000 : 3000);
@@ -43,8 +50,9 @@ export default function App() {
     setDoc(next);
   }, []);
 
-  // Apply an edit. `coalesce` merges rapid edits of one control (slider
-  // drags) into a single undo step.
+  // Apply an edit. `coalesce` merges rapid edits of one control (slider drags)
+  // into one undo step. With the main-track magnet on, the main track never
+  // has gaps (CapCut behavior).
   const apply = useCallback(
     (fn, { coalesce } = {}) => {
       const d = docRef.current;
@@ -52,6 +60,7 @@ export default function App() {
       let next;
       try {
         next = fn(d.project);
+        if (next) next = ops.settle(next);
       } catch (err) {
         notify(err.message, "error");
         return false;
@@ -101,7 +110,7 @@ export default function App() {
       playing.set(false);
       playhead.set(0);
       commit({ path: opened.path, project: opened.project }, { markDirty: false });
-      if (opened.warnings?.length) notify(`Imported with ${opened.warnings.length} note(s): ${opened.warnings[0]}`, "info");
+      if (opened.warnings?.length) notify(`Imported with ${opened.warnings.length} note(s): ${opened.warnings[0]}`);
     },
     [commit, notify],
   );
@@ -110,7 +119,6 @@ export default function App() {
     api.initial().then(openDoc).catch((e) => notify(e.message, "error"));
   }, [openDoc, notify]);
 
-  // Autosave shortly after each edit.
   useEffect(() => {
     if (!doc || !dirty.current) return;
     setSaveState("saving");
@@ -127,7 +135,6 @@ export default function App() {
     return () => clearTimeout(t);
   }, [doc, notify]);
 
-  // An agent (or anything else) changed the project file on disk.
   useEffect(
     () =>
       api.on("project:external", (project) => {
@@ -142,150 +149,251 @@ export default function App() {
     [commit, notify],
   );
 
-  // Preview proxies and waveforms, one media item at a time.
-  const queue = useRef(new Set());
+  // Preview proxies, then waveforms and filmstrips, one media item at a time.
+  const queued = useRef(new Set());
+  const chain = useRef(Promise.resolve());
   useEffect(() => {
     if (!doc) return;
     for (const m of doc.project.media) {
-      if (queue.current.has(m.id)) continue;
-      queue.current.add(m.id);
-      (async () => {
+      if (queued.current.has(m.id)) continue;
+      queued.current.add(m.id);
+      setProxies((p) => ({ ...p, [m.id]: { progress: 0 } }));
+      chain.current = chain.current.then(async () => {
         try {
-          setProxies((p) => ({ ...p, [m.id]: { progress: 0 } }));
           const path = await api.proxy(m);
           setProxies((p) => ({ ...p, [m.id]: path }));
-          if (m.hasAudio) {
-            const w = await api.waveform(m);
-            setWaves((x) => ({ ...x, [m.id]: w }));
+          if (m.hasAudio) api.waveform(m).then((w) => setWaves((x) => ({ ...x, [m.id]: w }))).catch(() => {});
+          if (m.hasVideo) {
+            const strip = await api.filmstrip(m, path !== m.path ? path : undefined).catch(() => null);
+            if (strip) setStrips((x) => ({ ...x, [m.id]: strip }));
           }
         } catch (e) {
           setProxies((p) => ({ ...p, [m.id]: { error: e.message } }));
           notify(`${m.name}: ${e.message}`, "error");
         }
-      })();
+      });
     }
   }, [doc, notify]);
-  useEffect(
-    () =>
-      api.on("proxy:progress", ({ mediaId, p }) =>
-        setProxies((x) => (typeof x[mediaId] === "string" ? x : { ...x, [mediaId]: { progress: p } })),
-      ),
-    [],
-  );
+  useEffect(() => api.on("proxy:progress", ({ mediaId, p }) => setProxies((x) => (typeof x[mediaId] === "string" ? x : { ...x, [mediaId]: { progress: p } }))), []);
+  useEffect(() => api.on("job:progress", ({ kind, id, p }) => setJobs((j) => ({ ...j, [`${kind}:${id}`]: p }))), []);
 
-  // ---- actions
   const project = doc?.project;
 
-  const importMedia = useCallback(async () => {
-    try {
-      const infos = await api.importMedia();
-      if (!infos.length) return;
-      let added = 0;
-      apply((p) => {
-        let next = p;
-        const wasEmpty = p.clips.length === 0;
-        for (const info of infos) {
-          const r = ops.addMedia(next, info);
-          next = r.project;
-          if (wasEmpty) next = ops.addClip(next, { mediaId: r.media.id }).project;
-          added++;
-        }
-        return next;
-      });
-      notify(`Imported ${added} file${added === 1 ? "" : "s"}`);
-    } catch (e) {
-      notify(e.message, "error");
-    }
-  }, [apply, notify]);
-
-  const splitAtPlayhead = useCallback(() => {
-    const t = playhead.get();
-    apply((p) => {
-      const targets = selection.clips.length ? selection.clips : null;
-      if (!targets) return ops.splitAt(p, t);
-      let next = p;
-      for (const id of targets) next = ops.splitClip(next, id, t).project;
-      return next;
-    });
-  }, [apply, selection]);
-
-  const deleteSelection = useCallback(
-    (ripple) => {
-      if (selection.clips.length) apply((p) => ops.deleteClips(p, selection.clips, { ripple }));
-      else if (selection.bleep) apply((p) => ops.removeBleep(p, selection.bleep));
-      else if (selection.markers.length) apply((p) => ops.removeMarkers(p, selection.markers));
-      setSelection(EMPTY_SELECTION);
-    },
-    [apply, selection],
-  );
-
-  const addBleep = useCallback(() => {
-    const t = playhead.get();
-    const [a, b] = range.in != null && range.out != null && range.out > range.in ? [range.in, range.out] : [t - 0.2, t + 0.2];
-    apply((p) => ops.addBleep(p, Math.max(0, a), b));
-  }, [apply, range]);
-
-  const punchClipAt = useCallback(
-    (p, t) => {
-      const under = clipsAt(p, t).filter((c) => trackById(p, c.trackId).kind === "video");
-      const chosen = under.find((c) => selection.clips.includes(c.id));
-      if (chosen) return chosen;
-      const order = videoLayers(p).map((x) => x.id).reverse(); // top layer first
-      return under.sort((a, b) => order.indexOf(a.trackId) - order.indexOf(b.trackId))[0];
+  // Clips the "current" actions target: the selection, else what's under the
+  // playhead on the top-most visible video layer.
+  const targetClips = useCallback(
+    (kinds = ["video"]) => {
+      const p = docRef.current.project;
+      const sel = selection.clips.map((id) => clipById(p, id)).filter(Boolean);
+      if (sel.length) return sel;
+      const t = playhead.get();
+      const order = videoLayers(p).map((x) => x.id).reverse();
+      return clipsAt(p, t)
+        .filter((c) => kinds.includes(trackById(p, c.trackId).kind))
+        .sort((a, b) => order.indexOf(a.trackId) - order.indexOf(b.trackId))
+        .slice(0, 1);
     },
     [selection],
   );
 
-  const punchIn = useCallback(
-    (opts = PUNCH_DEFAULTS) => {
-      const t = playhead.get();
-      apply((p) => {
-        const c = punchClipAt(p, t);
-        if (!c) throw new Error("No video clip under the playhead");
-        const room = clipEnd(c) - t;
-        const hold = opts.hold != null ? Math.min(opts.hold, Math.max(0, room - opts.ramp - (opts.release ?? opts.ramp))) : null;
-        return ops.punchIn(p, c.id, t, { ...opts, hold });
-      });
-    },
-    [apply, punchClipAt],
-  );
+  const actions = useMemo(() => {
+    const t = () => playhead.get();
+    const withClip = (fn, kinds) => {
+      const [c] = targetClips(kinds);
+      if (!c) return notify("Select a clip first (or put the playhead over one)", "error");
+      return fn(c);
+    };
+    return {
+      importMedia: async () => {
+        try {
+          const infos = await api.importMedia();
+          if (!infos.length) return;
+          apply((p) => {
+            let next = p;
+            const wasEmpty = p.clips.length === 0;
+            for (const info of infos) {
+              const r = ops.addMedia(next, info);
+              next = r.project;
+              if (wasEmpty) next = ops.addClip(next, { mediaId: r.media.id }).project;
+            }
+            return next;
+          });
+          notify(`Imported ${infos.length} file${infos.length === 1 ? "" : "s"}`);
+        } catch (e) {
+          notify(e.message, "error");
+        }
+      },
+      addMedia: (mediaId, at = {}) =>
+        apply((p) => {
+          const m = mediaById(p, mediaId);
+          const onMain = m.hasVideo && (!at.trackId || at.trackId === mainTrack(p).id);
+          if (onMain && magnetRef.current && at.start != null) {
+            const added = ops.addClip(p, { mediaId, trackId: mainTrack(p).id, start: projectDuration(p) + 100 }).project;
+            const clip = added.clips.find((c) => !p.clips.some((x) => x.id === c.id));
+            return ops.insertOnTrack(added, clip.id, at.start, mainTrack(added).id);
+          }
+          return ops.addClip(p, { mediaId, ...at }).project;
+        }),
+      split: () =>
+        apply((p) => {
+          const time = t();
+          if (selection.clips.length) {
+            let next = p;
+            for (const id of selection.clips) next = ops.splitClip(next, id, time).project;
+            return next;
+          }
+          return ops.splitAt(p, time);
+        }),
+      splitClipAt: (id, time) => apply((p) => ops.splitClip(p, id, time).project),
+      remove: (ripple) => {
+        if (selection.transition) apply((p) => ops.setTransition(p, selection.transition, null));
+        else if (selection.clips.length) apply((p) => ops.deleteClips(p, selection.clips, { ripple }));
+        else if (selection.bleep) apply((p) => ops.removeBleep(p, selection.bleep));
+        else if (selection.markers.length) apply((p) => ops.removeMarkers(p, selection.markers));
+        setSelection(EMPTY_SELECTION);
+      },
+      deleteSide: (side) => {
+        const ids = targetClips(["video", "audio", "text"]).map((c) => c.id);
+        if (!ids.length) return;
+        apply((p) => ops.trimToTime(p, ids, t(), side, { ripple: magnetRef.current }));
+      },
+      bleep: () => {
+        const [a, b] = range.in != null && range.out != null && range.out > range.in ? [range.in, range.out] : [t() - 0.2, t() + 0.2];
+        apply((p) => ops.addBleep(p, Math.max(0, a), b));
+      },
+      punchIn: (opts = PUNCH_DEFAULTS) =>
+        withClip((c) =>
+          apply((p) => {
+            const time = t();
+            if (time < c.start || time >= clipEnd(c)) throw new Error("Move the playhead over the clip to punch in");
+            const room = clipEnd(c) - time;
+            const hold = opts.hold != null ? Math.min(opts.hold, Math.max(0, room - opts.ramp - (opts.release ?? opts.ramp))) : null;
+            return ops.punchIn(p, c.id, time, { ...opts, hold });
+          }),
+        ),
+      mirror: () => withClip((c) => apply((p) => ops.setClip(p, c.id, { flipH: !c.flipH }))),
+      rotate: () => withClip((c) => apply((p) => ops.setClip(p, c.id, { transform: { rotation: ((c.transform.rotation + 90 + 180) % 360) - 180 } }))),
+      freeze: () =>
+        withClip(async (c) => {
+          const m = mediaById(docRef.current.project, c.mediaId);
+          const time = t();
+          if (time <= c.start || time >= clipEnd(c)) return notify("Move the playhead inside the clip to freeze a frame", "error");
+          try {
+            const still = await api.freezeFrame(m, sourceAt(c, time));
+            apply((p) => {
+              const r = ops.addMedia(p, still);
+              return ops.insertFreeze(r.project, c.id, time, r.media.id, 3);
+            });
+          } catch (e) {
+            notify(e.message, "error");
+          }
+        }),
+      reverse: () =>
+        withClip(async (c) => {
+          const m = mediaById(docRef.current.project, c.mediaId);
+          if (m.kind === "image") return;
+          const id = c.id;
+          notify("Reversing… (rendered once, then cached)");
+          try {
+            const info = await api.reverse(m, c.in, c.out, id);
+            apply((p) => {
+              const r = ops.addMedia(p, info);
+              return ops.replaceClipMedia(r.project, id, r.media.id, { in: 0, out: info.duration, reverseKeyframes: true });
+            });
+            notify("Reversed");
+          } catch (e) {
+            notify(e.message, "error");
+          }
+        }),
+      extractAudio: () => withClip((c) => apply((p) => ops.extractAudio(p, c.id))),
+      addText: (styleId = "classic", text = "Text") => {
+        const style = byId(TEXT_STYLES, styleId)?.style ?? {};
+        const [sel] = selection.clips.map((id) => clipById(docRef.current.project, id)).filter((c) => c && isText(c));
+        if (sel) return apply((p) => ops.setClip(p, sel.id, { style }));
+        apply((p) => {
+          const r = ops.addText(p, { text, style, start: t(), duration: 3 });
+          setSelection({ ...EMPTY_SELECTION, clips: [r.clip.id] });
+          return r.project;
+        });
+      },
+      applyEffect: (id) => withClip((c) => apply((p) => ops.setClip(p, c.id, { effects: [...c.effects.filter((e) => e.id !== id), { id, intensity: 60 }] }))),
+      applyFilter: (id) => withClip((c) => apply((p) => ops.setClip(p, c.id, { filter: id ? { id, intensity: 100 } : null }))),
+      applyAnimation: (slot, type) => withClip((c) => apply((p) => ops.setClip(p, c.id, { [slot]: type ? { type, duration: c[slot]?.duration ?? 0.5 } : null })), ["video", "text"]),
+      applyTransition: (type) => {
+        const p = docRef.current.project;
+        // The cut nearest the playhead on the main track (or the selected clip's start).
+        let target = selection.clips.length ? clipById(p, selection.clips[0]) : null;
+        if (!target || !ops.previousTouching(p, target)) {
+          const main = p.clips.filter((c) => c.trackId === mainTrack(p).id && ops.previousTouching(p, c));
+          target = main.sort((a, b) => Math.abs(a.start - t()) - Math.abs(b.start - t()))[0];
+        }
+        if (!target) return notify("Transitions go between two touching clips on a track", "error");
+        if (apply((x) => ops.setTransition(x, target.id, { type, duration: target.transition?.duration ?? 0.5 }))) setSelection({ ...EMPTY_SELECTION, transition: target.id });
+      },
+      copy: () => {
+        const [c] = targetClips(["video", "audio", "text"]);
+        if (c) clipboard.current = c.id;
+      },
+      paste: () => {
+        if (!clipboard.current) return;
+        apply((p) => (clipById(p, clipboard.current) ? ops.duplicateClip(p, clipboard.current, t()).project : p));
+      },
+      autoCaptions: async ({ mediaId, language, styleId }) => {
+        const p = docRef.current.project;
+        const m = mediaById(p, mediaId);
+        if (!m) return notify("Pick an audio source", "error");
+        const id = `cap_${Date.now()}`;
+        try {
+          const result = await api.transcribe(m, { language }, id);
+          const lines = captionLines(docRef.current.project, mediaId, result.segments);
+          if (!lines.length) return notify("No speech found in that audio", "error");
+          apply((x) => ops.addTextTrack(x, lines, { name: "Captions", style: byId(TEXT_STYLES, styleId)?.style ?? byId(TEXT_STYLES, "subtitle").style }).project);
+          notify(`Added ${lines.length} captions (${result.language})`);
+        } catch (e) {
+          notify(e.message, "error");
+        } finally {
+          setJobs((j) => {
+            const { [`captions:${id}`]: _, ...rest } = j;
+            return rest;
+          });
+        }
+      },
+    };
+  }, [apply, notify, range, selection, targetClips]);
 
-  const addClipFromMedia = useCallback(
-    (mediaId, at) => apply((p) => ops.addClip(p, { mediaId, ...at }).project),
-    [apply],
-  );
-
-  // ---- keyboard
+  // ---- keyboard (CapCut-compatible where CapCut has a shortcut)
   useEffect(() => {
     const onKey = (e) => {
       if (!docRef.current) return;
-      if (e.target.closest("input, select, textarea")) return;
+      if (e.target.closest("input, select, textarea, [contenteditable]")) return;
       const p = docRef.current.project;
       const fps = p.canvas.fps;
       const dur = projectDuration(p);
       const key = e.key.toLowerCase();
       const ctrl = e.ctrlKey || e.metaKey;
-      const seek = (t) => playhead.set(Math.min(Math.max(0, t), dur));
+      const seek = (time) => playhead.set(Math.min(Math.max(0, time), dur));
       if (key === " ") {
-        e.preventDefault();
         if (!playing.get() && playhead.get() >= dur - 0.01) playhead.set(0);
         playing.set(!playing.get());
-      } else if (ctrl && key === "z" && !e.shiftKey) {
-        e.preventDefault();
-        undo();
-      } else if (ctrl && (key === "y" || (key === "z" && e.shiftKey))) {
-        e.preventDefault();
-        redo();
-      } else if (ctrl && key === "e") {
-        e.preventDefault();
-        setExportOpen(true);
-      } else if (ctrl && key === "i") {
-        e.preventDefault();
-        importMedia();
-      } else if (key === "s" && !ctrl) splitAtPlayhead();
-      else if (key === "delete" || key === "backspace") deleteSelection(e.shiftKey);
-      else if (key === "b") addBleep();
-      else if (key === "p") punchIn();
+      } else if (ctrl && key === "z" && !e.shiftKey) undo();
+      else if (ctrl && (key === "y" || (key === "z" && e.shiftKey))) redo();
+      else if (ctrl && key === "b") actions.split();
+      else if (ctrl && key === "e") setExportOpen(true);
+      else if (ctrl && key === "i") actions.importMedia();
+      else if (ctrl && key === "c") actions.copy();
+      else if (ctrl && key === "v") actions.paste();
+      else if (ctrl && (key === "=" || key === "+")) window.dispatchEvent(new CustomEvent("timeline-zoom", { detail: 1.4 }));
+      else if (ctrl && key === "-") window.dispatchEvent(new CustomEvent("timeline-zoom", { detail: 1 / 1.4 }));
+      else if (ctrl) return;
+      else if (key === "q") actions.deleteSide("left");
+      else if (key === "w") actions.deleteSide("right");
+      else if (key === "a") setTool("select");
+      else if (key === "b" && e.shiftKey) actions.bleep();
+      else if (key === "b") setTool("blade");
+      else if (key === "z" && e.shiftKey) window.dispatchEvent(new CustomEvent("timeline-fit"));
+      else if (key === "n") setSnap((s) => !s);
+      else if (key === "p") actions.punchIn();
+      else if (key === "delete" || key === "backspace") actions.remove(e.shiftKey);
       else if (key === "i") setRange((r) => ({ ...r, in: playhead.get() }));
       else if (key === "o") setRange((r) => ({ ...r, out: playhead.get() }));
       else if (key === "x") setRange({ in: null, out: null });
@@ -294,13 +402,50 @@ export default function App() {
       else if (key === "arrowright") seek(playhead.get() + (e.shiftKey ? 1 : 1 / fps));
       else if (key === "home") seek(0);
       else if (key === "end") seek(dur);
-      else if (key === "escape") setSelection(EMPTY_SELECTION);
-      else return;
+      else if (key === "escape") {
+        setSelection(EMPTY_SELECTION);
+        setTool("select");
+      } else return;
       e.preventDefault();
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [undo, redo, splitAtPlayhead, deleteSelection, addBleep, punchIn, importMedia, apply]);
+  }, [undo, redo, actions, apply]);
+
+  const editor = useMemo(
+    () =>
+      project && {
+        project,
+        path: doc.path,
+        apply,
+        undo,
+        redo,
+        canUndo: history.current.past.length > 0,
+        canRedo: history.current.future.length > 0,
+        selection,
+        setSelection,
+        range,
+        setRange,
+        proxies,
+        waves,
+        strips,
+        jobs: jobsState,
+        notify,
+        tool,
+        setTool,
+        magnet,
+        setMagnet: (on) => apply((p) => ops.setSettings(p, { magnet: on })),
+        snap,
+        setSnap,
+        libraryTab,
+        setLibraryTab,
+        saveState,
+        actions,
+        openExport: () => setExportOpen(true),
+        openDoc,
+      },
+    [project, doc, apply, undo, redo, selection, range, proxies, waves, strips, jobsState, notify, tool, magnet, snap, libraryTab, saveState, actions, openDoc],
+  );
 
   if (!doc) {
     return (
@@ -315,53 +460,19 @@ export default function App() {
     );
   }
 
-  const selectedClip = selection.clips.length === 1 ? clipById(project, selection.clips[0]) : null;
-
   return (
-    <div className="app">
-      <TopBar
-        project={project}
-        path={doc.path}
-        saveState={saveState}
-        canUndo={history.current.past.length > 0}
-        canRedo={history.current.future.length > 0}
-        onUndo={undo}
-        onRedo={redo}
-        onNew={async () => openDoc(await api.newProject({}).catch((e) => notify(e.message, "error")))}
-        onOpen={async () => openDoc(await api.openProject().catch((e) => notify(e.message, "error")))}
-        onImportCapcut={async () => openDoc(await api.importCapcut().catch((e) => notify(e.message, "error")))}
-        onExport={() => setExportOpen(true)}
-      />
-      <div className="workspace">
-        <MediaBin project={project} proxies={proxies} onImport={importMedia} onAdd={(id) => addClipFromMedia(id, {})} />
-        <Player project={project} proxies={proxies} range={range} />
-        <Inspector
-          project={project}
-          clip={selectedClip}
-          bleep={selection.bleep ? project.bleeps.find((b) => b.id === selection.bleep) : null}
-          selection={selection}
-          setSelection={setSelection}
-          apply={apply}
-          notify={notify}
-          onPunchIn={punchIn}
-          mediaOf={(id) => mediaById(project, id)}
-        />
+    <EditorContext.Provider value={editor}>
+      <div className="app">
+        <TopBar />
+        <div className="workspace">
+          <Library />
+          <Player />
+          <Properties />
+        </div>
+        <Timeline />
+        {exportOpen && <ExportDialog onClose={() => setExportOpen(false)} />}
+        {toast && <div className={`toast ${toast.kind}`}>{toast.text}</div>}
       </div>
-      <Timeline
-        project={project}
-        selection={selection}
-        setSelection={setSelection}
-        apply={apply}
-        waves={waves}
-        range={range}
-        onSplit={splitAtPlayhead}
-        onDelete={deleteSelection}
-        onBleep={addBleep}
-        onPunchIn={() => punchIn()}
-        onDropMedia={addClipFromMedia}
-      />
-      {exportOpen && <ExportDialog project={project} range={range} onClose={() => setExportOpen(false)} notify={notify} />}
-      {toast && <div className={`toast ${toast.kind}`}>{toast.text}</div>}
-    </div>
+    </EditorContext.Provider>
   );
 }

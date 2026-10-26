@@ -1,13 +1,14 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from "electron";
-import { createReadStream, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
+import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
 import { dirname, extname, join } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { importCapcutDraft } from "../core/capcut-import.js";
 import { createProject } from "../core/model.js";
-import { availableEncoders, renderFrame, renderProject } from "../node/exporter.js";
-import { detectSilence, ensureProxy, probe, waveform } from "../node/media.js";
+import { transcribe } from "../node/captions.js";
+import { availableEncoders, renderAudio, renderFrame, renderProject } from "../node/exporter.js";
+import { detectSilence, ensureProxy, extractFrame, filmstrip, makeReversed, probe, waveform } from "../node/media.js";
 import { loadProject, PROJECT_EXT, readState, saveProject, watchProject, writeState } from "../node/store.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -15,6 +16,7 @@ const argv = process.argv.slice(1);
 const flag = (name) => argv.find((a) => a.startsWith(`--${name}=`))?.split("=").slice(1).join("=");
 const SMOKE = argv.includes("--smoke");
 const CAPCUT_DRAFTS = join(process.env.LOCALAPPDATA ?? homedir(), "CapCut", "User Data", "Projects", "com.lveditor.draft");
+const PREVIEW_DIR = join(tmpdir(), "cutroom", "preview");
 
 protocol.registerSchemesAsPrivileged([
   { scheme: "cutroom-media", privileges: { standard: true, secure: true, stream: true, supportFetchAPI: true, corsEnabled: true } },
@@ -90,6 +92,11 @@ function handle(channel, fn) {
   });
 }
 
+// Long tasks report progress on "job:progress" with their kind and id.
+function job(kind, id, fn) {
+  return fn((p) => send("job:progress", { kind, id, p }));
+}
+
 handle("app:initial", () => {
   const explicit = flag("project");
   const last = readState().lastProject;
@@ -100,8 +107,7 @@ handle("app:initial", () => {
 handle("project:new", async ({ name = "Untitled", canvas = "1080p" } = {}) => {
   const path = await askSavePath("New project", `${name}${PROJECT_EXT}`);
   if (!path) return null;
-  const project = createProject({ name, canvas });
-  saveTo(path, project);
+  saveTo(path, createProject({ name, canvas }));
   return openProjectFile(path);
 });
 
@@ -125,8 +131,7 @@ handle("capcut:import", async () => {
     properties: ["openFile"],
   });
   if (r.canceled) return null;
-  const draft = JSON.parse(readFileSync(r.filePaths[0], "utf8"));
-  const { project, warnings } = importCapcutDraft(draft);
+  const { project, warnings } = importCapcutDraft(JSON.parse(readFileSync(r.filePaths[0], "utf8")));
   const path = await askSavePath("Save imported project", `${project.name}${PROJECT_EXT}`);
   if (!path) return null;
   saveTo(path, project);
@@ -143,19 +148,42 @@ handle("media:import", async () => {
   return Promise.all(r.filePaths.map((p) => probe(p)));
 });
 
+handle("lut:choose", async () => {
+  const r = await dialog.showOpenDialog(win, { title: "Import LUT", filters: [{ name: "3D LUT", extensions: ["cube", "3dl", "dat"] }], properties: ["openFile"] });
+  return r.canceled ? null : r.filePaths[0];
+});
+
 handle("media:probe", (path) => probe(path));
 handle("media:proxy", (media) => ensureProxy(media, { onProgress: (p) => send("proxy:progress", { mediaId: media.id, p }) }));
 handle("media:waveform", (media) => waveform(media));
+handle("media:filmstrip", (media, source) => filmstrip(media, { source }));
 handle("media:silence", (media, opts) => detectSilence(media, opts));
+handle("media:reverse", (media, inn, out, id) => job("reverse", id, (onProgress) => makeReversed(media, inn, out, { onProgress })));
+handle("media:freeze", (media, time) => extractFrame(media, time));
+handle("captions:transcribe", (media, opts, id) => job("captions", id, (onProgress) => transcribe(media, { ...opts, onProgress })));
 handle("encoders:list", () => availableEncoders());
+
+let previewSeq = 0;
+handle("frame:preview", async (project, time, width) => {
+  mkdirSync(PREVIEW_DIR, { recursive: true });
+  const out = join(PREVIEW_DIR, `f${previewSeq++ % 8}.jpg`);
+  await renderFrame(project, time, out, { previewWidth: width });
+  return out;
+});
+
+handle("audio:snippet", async (project, range) => {
+  mkdirSync(PREVIEW_DIR, { recursive: true });
+  return renderAudio(project, range, join(PREVIEW_DIR, `a${previewSeq++ % 4}.m4a`));
+});
 
 handle("export:start", async (project, opts = {}) => {
   let outPath = opts.outPath;
   if (!outPath) {
+    const ext = opts.codec === "prores" ? "mov" : "mp4";
     const r = await dialog.showSaveDialog(win, {
       title: "Export video",
-      defaultPath: join(current.path ? dirname(current.path) : app.getPath("videos"), `${project.name}${opts.preset && opts.preset !== "landscape" ? `-${opts.preset}` : ""}.mp4`),
-      filters: [{ name: "MP4 video", extensions: ["mp4"] }],
+      defaultPath: join(current.path ? dirname(current.path) : app.getPath("videos"), `${opts.name || project.name}.${ext}`),
+      filters: [{ name: ext.toUpperCase(), extensions: [ext] }],
     });
     if (r.canceled || !r.filePath) return null;
     outPath = r.filePath;
@@ -176,16 +204,15 @@ handle("export:cancel", () => {
   return true;
 });
 
-handle("frame:render", (project, time, outPath) => renderFrame(project, time, outPath));
 handle("shell:reveal", (path) => shell.showItemInFolder(path));
 
 function createWindow() {
   win = new BrowserWindow({
-    width: 1600,
-    height: 980,
-    minWidth: 1100,
-    minHeight: 700,
-    backgroundColor: "#111316",
+    width: 1680,
+    height: 1000,
+    minWidth: 1200,
+    minHeight: 720,
+    backgroundColor: "#0e0e10",
     title: "Cutroom",
     show: !SMOKE,
     webPreferences: { preload: join(here, "preload.cjs"), contextIsolation: true, sandbox: true },
@@ -195,9 +222,18 @@ function createWindow() {
   if (devUrl) win.loadURL(devUrl);
   else win.loadFile(join(here, "..", "dist", "index.html"));
   if (SMOKE) {
-    // Headless self-check: render the UI, save a screenshot, quit.
+    // Headless self-check: render the UI, optionally drive it, save a screenshot.
     win.webContents.once("did-finish-load", () => {
       setTimeout(async () => {
+        const script = flag("smoke-js");
+        if (script) {
+          try {
+            await win.webContents.executeJavaScript(readFileSync(script, "utf8"));
+          } catch (err) {
+            console.log(`SMOKE_JS_ERROR ${err.message}`);
+          }
+          await new Promise((r) => setTimeout(r, Number(flag("settle") ?? 1500)));
+        }
         const image = await win.webContents.capturePage();
         const out = flag("screenshot") ?? join(app.getPath("temp"), "cutroom-smoke.png");
         writeFileSync(out, image.toPNG());

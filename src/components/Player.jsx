@@ -1,5 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { clipEnd, clipLength, formatTime, mediaById, projectDuration, transformAt, videoLayers } from "../../core/model.js";
+import { CANVAS_PRESETS, clipEnd, clipLength, evaluateClip, formatTime, isText, mediaById, projectDuration, sourceAt, videoLayers } from "../../core/model.js";
+import * as ops from "../../core/ops.js";
+import { useEditor } from "../editor.js";
+import { cropPath, cssFilter, vignetteOf } from "../look.js";
 import { mediaUrl, playhead, playing, useStore } from "../state.js";
 import Icon from "./icons.jsx";
 
@@ -18,19 +21,59 @@ function Timecode({ fps, duration }) {
   const t = useStore(playhead);
   return (
     <div className="timecode">
-      <span>{formatTime(t, fps)}</span>
+      <span className="tc-now">{formatTime(t, fps)}</span>
       <span className="muted"> / {formatTime(duration, fps)}</span>
     </div>
   );
 }
 
-export default function Player({ project, proxies, range }) {
+function TextLayer({ project, stage }) {
+  const t = useStore(playhead);
+  const k = stage.h / 1080;
+  const tracks = project.tracks.filter((x) => x.kind === "text" && !x.hidden).reverse();
+  return tracks.flatMap((track) =>
+    project.clips
+      .filter((c) => c.trackId === track.id && c.start <= t && clipEnd(c) > t)
+      .map((c) => {
+        const v = evaluateClip(c, t - c.start);
+        const st = c.style;
+        return (
+          <div
+            key={c.id}
+            className="text-overlay"
+            style={{
+              left: `${(0.5 + v.x) * 100}%`,
+              top: `${(0.5 + v.y) * 100}%`,
+              opacity: v.opacity,
+              fontFamily: `"${st.font}"`,
+              fontWeight: st.bold ? 700 : 400,
+              fontSize: `${st.size * k * c.transform.scale}px`,
+              color: st.color,
+              WebkitTextStroke: st.strokeWidth ? `${st.strokeWidth * k * 2}px ${st.strokeColor}` : undefined,
+              background: st.bg ? `#${st.bg.slice(1)}` : undefined,
+              padding: st.bg ? `${st.size * 0.3 * k}px` : undefined,
+              textShadow: st.shadow ? `${4 * k}px ${4 * k}px 0 #000b` : undefined,
+            }}
+          >
+            {c.text}
+          </div>
+        );
+      }),
+  );
+}
+
+export default function Player() {
+  const { project, proxies, range, apply } = useEditor();
   const wrapRef = useRef(null);
-  const els = useRef(new Map()); // trackId -> { video, img }
+  const els = useRef(new Map());
+  const refCache = useRef(new Map());
   const [stage, setStage] = useState({ w: 640, h: 360 });
   const [waiting, setWaiting] = useState(false);
+  const [exact, setExact] = useState(true);
+  const [still, setStill] = useState(null); // { url, key }
+  const [ratioOpen, setRatioOpen] = useState(false);
   const isPlaying = useStore(playing);
-  const refCache = useRef(new Map());
+  const t = useStore(playhead);
   const audioCtx = useRef(null);
   const tone = useRef(null);
   const latest = useRef({ project, proxies });
@@ -48,7 +91,6 @@ export default function Player({ project, proxies, range }) {
     return () => ro.disconnect();
   }, [W, H]);
 
-  // Bring every track's media element in line with time `now`.
   const sync = (now, force) => {
     const { project: p, proxies: px } = latest.current;
     const live = playing.get();
@@ -57,47 +99,62 @@ export default function Player({ project, proxies, range }) {
     for (const b of p.bleeps) if (now >= b.start && now < b.end) bleeping = true;
     const layers = videoLayers(p);
     for (const track of p.tracks) {
+      if (track.kind === "text") continue;
       const slot = els.current.get(track.id);
       if (!slot) continue;
       const clip = p.clips.find((c) => c.trackId === track.id && c.start <= now + 1e-6 && clipEnd(c) > now + 1e-6);
-      const media = clip && mediaById(p, clip.mediaId);
-      const visible = clip && !(track.kind === "video" && track.hidden);
+      const media = clip && !isText(clip) && mediaById(p, clip.mediaId);
+      const visible = media && !(track.kind === "video" && track.hidden);
       const el = slot.video;
-      if (!visible || !media) {
+      const hideAll = () => {
         if (el) {
           el.style.visibility = "hidden";
           if (!el.paused) el.pause();
         }
         if (slot.img) slot.img.style.visibility = "hidden";
+        if (slot.vig) slot.vig.style.opacity = "0";
+      };
+      if (!visible) {
+        hideAll();
         continue;
       }
       const ready = typeof px[media.id] === "string" ? px[media.id] : DIRECT.test(media.path) ? media.path : null;
       if (!ready) {
         missing = true;
-        if (el) el.style.visibility = "hidden";
+        hideAll();
         continue;
       }
-      const tr = transformAt(clip, now - clip.start);
-      const css = `translate(${tr.x * 100}%, ${tr.y * 100}%) scale(${tr.scale})`;
+      const v = evaluateClip(clip, now - clip.start);
+      const css = `translate(${v.x * 100}%, ${v.y * 100}%) rotate(${v.rotation}deg) scale(${v.scale}) scale(${clip.flipH ? -1 : 1}, ${clip.flipV ? -1 : 1})`;
+      const crop = clip.flipH || clip.flipV ? cropPath({ crop: { l: clip.flipH ? clip.crop.r : clip.crop.l, r: clip.flipH ? clip.crop.l : clip.crop.r, t: clip.flipV ? clip.crop.b : clip.crop.t, b: clip.flipV ? clip.crop.t : clip.crop.b } }) : cropPath(clip);
       const z = String(layers.findIndex((l) => l.id === track.id) + 1);
+      const look = (node) => {
+        node.style.transform = css;
+        node.style.zIndex = z;
+        node.style.opacity = String(v.opacity);
+        node.style.filter = cssFilter(clip);
+        node.style.clipPath = crop;
+      };
+      if (slot.vig) {
+        slot.vig.style.opacity = String(vignetteOf(clip));
+        slot.vig.style.zIndex = z;
+      }
       if (media.kind === "image") {
         if (el) el.style.visibility = "hidden";
-        const img = slot.img;
-        if (img) {
+        if (slot.img) {
           const url = mediaUrl(ready);
-          if (img.dataset.src !== url) {
-            img.src = url;
-            img.dataset.src = url;
+          if (slot.img.dataset.src !== url) {
+            slot.img.src = url;
+            slot.img.dataset.src = url;
           }
-          img.style.visibility = "visible";
-          img.style.transform = css;
-          img.style.zIndex = z;
+          slot.img.style.visibility = "visible";
+          look(slot.img);
         }
         continue;
       }
       if (slot.img) slot.img.style.visibility = "hidden";
       const url = mediaUrl(ready);
-      const want = clip.in + (now - clip.start);
+      const want = sourceAt(clip, now);
       if (el.dataset.src !== url) {
         el.src = url;
         el.dataset.src = url;
@@ -106,13 +163,13 @@ export default function Player({ project, proxies, range }) {
         const drift = Math.abs(el.currentTime - want);
         if (force || drift > (live ? 0.3 : 0.02)) el.currentTime = want;
       } else el.dataset.pending = String(want);
+      el.playbackRate = Math.min(16, Math.max(0.0625, clip.speed));
       const gain = track.muted || clip.muted || bleeping ? 0 : clip.volume * fadeGain(clip, now);
       el.volume = Math.min(1, gain);
       el.muted = gain <= 0;
       if (track.kind === "video") {
         el.style.visibility = "visible";
-        el.style.transform = css;
-        el.style.zIndex = z;
+        look(el);
       }
       if (live && el.paused) el.play().catch(() => {});
       if (!live && !el.paused) el.pause();
@@ -124,7 +181,6 @@ export default function Player({ project, proxies, range }) {
   useEffect(() => playhead.subscribe(() => sync(playhead.get(), !playing.get())), []);
   useEffect(() => sync(playhead.get(), true), [project, proxies]);
 
-  // Playback clock.
   useEffect(() => {
     if (!isPlaying) {
       sync(playhead.get(), true);
@@ -161,7 +217,25 @@ export default function Player({ project, proxies, range }) {
     return () => cancelAnimationFrame(raf);
   }, [isPlaying]);
 
-  // Stable ref callbacks so re-renders don't detach media elements.
+  // Exact preview: when paused, show the real FFmpeg render of this frame.
+  const stillKey = `${project.revision}:${t.toFixed(3)}:${stage.w}`;
+  useEffect(() => {
+    if (!exact || isPlaying || !project.clips.length || t >= duration) return;
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      try {
+        const file = await window.cutroom.previewFrame(project, t, Math.min(1600, Math.round(stage.w * (window.devicePixelRatio || 1) / 2) * 2));
+        if (!cancelled) setStill({ url: `${mediaUrl(file)}?v=${Date.now()}`, key: stillKey });
+      } catch {
+        // live preview stays visible
+      }
+    }, 260);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [stillKey, exact, isPlaying]);
+
   const bind = (trackId, kind) => {
     const key = `${trackId}:${kind}`;
     if (!refCache.current.has(key))
@@ -178,56 +252,74 @@ export default function Player({ project, proxies, range }) {
     playing.set(false);
     playhead.set(Math.min(Math.max(0, playhead.get() + d), duration));
   };
+  const onMeta = (e) => {
+    const want = Number(e.currentTarget.dataset.pending);
+    if (Number.isFinite(want)) e.currentTarget.currentTime = want;
+    delete e.currentTarget.dataset.pending;
+  };
+  const showStill = exact && !isPlaying && still && still.key === stillKey;
 
   return (
     <section className="panel player">
+      <div className="panel-head">
+        <span>Player</span>
+        <span className="head-meta">{W}×{H} · {fps} fps</span>
+      </div>
       <div className="player-stage-wrap" ref={wrapRef}>
         <div className="player-stage" style={{ width: stage.w, height: stage.h }}>
           {project.tracks.map((track) =>
             track.kind === "video" ? (
               <div key={track.id} className="layer">
-                <video
-                  ref={bind(track.id, "video")}
-                  playsInline
-                  preload="auto"
-                  onLoadedMetadata={(e) => {
-                    const want = Number(e.currentTarget.dataset.pending);
-                    if (Number.isFinite(want)) e.currentTarget.currentTime = want;
-                    delete e.currentTarget.dataset.pending;
-                  }}
-                />
+                <video ref={bind(track.id, "video")} playsInline preload="auto" onLoadedMetadata={onMeta} />
                 <img ref={bind(track.id, "img")} alt="" />
+                <div ref={bind(track.id, "vig")} className="vignette" />
               </div>
-            ) : (
-              <audio
-                key={track.id}
-                ref={bind(track.id, "video")}
-                preload="auto"
-                onLoadedMetadata={(e) => {
-                  const want = Number(e.currentTarget.dataset.pending);
-                  if (Number.isFinite(want)) e.currentTarget.currentTime = want;
-                  delete e.currentTarget.dataset.pending;
-                }}
-              />
-            ),
+            ) : track.kind === "audio" ? (
+              <audio key={track.id} ref={bind(track.id, "video")} preload="auto" onLoadedMetadata={onMeta} />
+            ) : null,
           )}
-          {!project.clips.length && <div className="stage-empty">Import a recording to start</div>}
+          <div className="text-layer">
+            <TextLayer project={project} stage={stage} />
+          </div>
+          {showStill && <img className="exact-still" src={still.url} alt="" />}
+          {!project.clips.length && <div className="stage-empty">Import media and drag it to the timeline</div>}
           {waiting && <div className="stage-badge">Preparing smooth preview…</div>}
         </div>
       </div>
       <div className="transport">
-        <button className="ghost icon-only" onClick={() => step(-1 / fps)} title="Previous frame (←)">
-          <Icon name="stepBack" />
-        </button>
-        <button className="play" onClick={() => playing.set(!isPlaying)} title="Play / pause (Space)">
-          <Icon name={isPlaying ? "pause" : "play"} size={18} />
-        </button>
-        <button className="ghost icon-only" onClick={() => step(1 / fps)} title="Next frame (→)">
-          <Icon name="stepFwd" />
-        </button>
         <Timecode fps={fps} duration={duration} />
-        <div className="canvas-tag">
-          {W}×{H} · {fps} fps
+        <div className="transport-center">
+          <button className="ghost icon-only" onClick={() => step(-1 / fps)} title="Previous frame (←)">
+            <Icon name="stepBack" />
+          </button>
+          <button className="play" onClick={() => playing.set(!isPlaying)} title="Play / pause (Space)">
+            <Icon name={isPlaying ? "pause" : "play"} size={18} />
+          </button>
+          <button className="ghost icon-only" onClick={() => step(1 / fps)} title="Next frame (→)">
+            <Icon name="stepFwd" />
+          </button>
+        </div>
+        <div className="transport-right">
+          <button className={`ghost small ${exact ? "active" : ""}`} onClick={() => setExact(!exact)} title="When paused, show the exact export render of the frame">
+            Exact
+          </button>
+          <div className="menu">
+            <button className="ghost small" onClick={() => setRatioOpen(!ratioOpen)} title="Canvas / ratio">
+              <Icon name="aspect" /> Ratio
+            </button>
+            {ratioOpen && (
+              <div className="menu-pop up right">
+                {Object.entries(CANVAS_PRESETS).map(([k, v]) => (
+                  <button key={k} onClick={() => (apply((p) => ops.setCanvas(p, v)), setRatioOpen(false))}>
+                    {k} · {v.width}×{v.height} · {v.fps}fps
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <button className="ghost icon-only" onClick={() => wrapRef.current?.requestFullscreen?.()} title="Full screen">
+            <Icon name="fullscreen" />
+          </button>
         </div>
       </div>
     </section>

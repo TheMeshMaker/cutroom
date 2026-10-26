@@ -3,7 +3,7 @@
 
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, extname, join } from "node:path";
 
@@ -132,6 +132,82 @@ export async function waveform(media, { perSecond = 100 } = {}) {
   const result = { perSecond, peaks };
   writeFileSync(file, JSON.stringify(result));
   return result;
+}
+
+// Thumbnail sprite for timeline filmstrips: `count` tiles, one every
+// `interval` source seconds, laid out `cols` per row.
+export async function filmstrip(media, { source } = {}) {
+  if (media.kind === "image") return { image: media.path, cols: 1, rows: 1, count: 1, interval: Infinity, tileW: 96, tileH: 54 };
+  if (!media.hasVideo || !(media.duration > 0)) return null;
+  mkdirSync(CACHE_DIR, { recursive: true });
+  const key = cacheKey(media.path, "strip-v1");
+  const meta = join(CACHE_DIR, `${key}-strip.json`);
+  if (existsSync(meta)) return JSON.parse(readFileSync(meta, "utf8"));
+  const count = Math.min(240, Math.max(1, Math.ceil(media.duration / 2)));
+  const interval = media.duration / count;
+  const cols = Math.min(count, 16);
+  const rows = Math.ceil(count / cols);
+  const tileH = 54;
+  const tileW = Math.max(2, Math.round((tileH * (media.width || 16)) / (media.height || 9) / 2) * 2);
+  const image = join(CACHE_DIR, `${key}-strip.jpg`);
+  // tpad guarantees the grid fills even if the source ends a little early.
+  const { code, stderr } = await run(FFMPEG, [
+    "-hide_banner", "-y", "-i", source ?? media.path, "-an",
+    "-vf", `fps=${f6(1 / interval)},scale=${tileW}:${tileH},tpad=stop_mode=clone:stop=${cols * rows},tile=${cols}x${rows}`, "-frames:v", "1", "-q:v", "5", image,
+  ]);
+  if (code !== 0) throw new Error(`Thumbnails failed: ${stderr.trim().split("\n").pop()}`);
+  const result = { image, cols, rows, count, interval, tileW, tileH };
+  writeFileSync(meta, JSON.stringify(result));
+  return result;
+}
+
+const f6 = (x) => x.toFixed(6);
+
+// A reversed copy of source range [inn, out], rendered in short chunks so it
+// never needs the whole clip in memory. Returns the new file's probe info.
+export async function makeReversed(media, inn, out, { onProgress } = {}) {
+  mkdirSync(CACHE_DIR, { recursive: true });
+  const key = cacheKey(media.path, `rev-${f6(inn)}-${f6(out)}`);
+  const file = join(CACHE_DIR, `${key}-reversed.mp4`);
+  if (!existsSync(file)) {
+    const work = join(CACHE_DIR, `${key}-rev-parts`);
+    mkdirSync(work, { recursive: true });
+    const parts = [];
+    const CHUNK = 3;
+    for (let e = out, i = 0; e > inn + 1e-3; e -= CHUNK, i++) {
+      const s = Math.max(inn, e - CHUNK);
+      const part = join(work, `p${String(i).padStart(4, "0")}.mp4`);
+      const args = ["-hide_banner", "-y", "-ss", f6(s), "-t", f6(e - s), "-i", media.path, "-vf", "reverse", "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-pix_fmt", "yuv420p"];
+      if (media.hasAudio) args.push("-af", "areverse", "-c:a", "aac", "-b:a", "192k");
+      else args.push("-an");
+      args.push(part);
+      const r = await run(FFMPEG, args);
+      if (r.code !== 0) throw new Error(`Reverse failed: ${r.stderr.trim().split("\n").pop()}`);
+      parts.push(part);
+      onProgress?.(Math.min(0.99, (out - s) / (out - inn)));
+    }
+    const list = join(work, "list.txt");
+    writeFileSync(list, parts.map((p) => `file '${p.replace(/\\/g, "/")}'`).join("\n"));
+    const tmp = `${file}.part.mp4`;
+    const r = await run(FFMPEG, ["-hide_banner", "-y", "-f", "concat", "-safe", "0", "-i", list, "-c", "copy", "-movflags", "+faststart", tmp]);
+    if (r.code !== 0) throw new Error(`Reverse join failed: ${r.stderr.trim().split("\n").pop()}`);
+    renameSync(tmp, file);
+    for (const p of [...parts, list]) rmSync(p, { force: true });
+    rmSync(work, { recursive: true, force: true });
+  }
+  onProgress?.(1);
+  return { ...(await probe(file)), name: `${media.name} (reversed)`, derivedFrom: media.id };
+}
+
+// One source frame as a PNG (for freeze frames).
+export async function extractFrame(media, time) {
+  mkdirSync(CACHE_DIR, { recursive: true });
+  const file = join(CACHE_DIR, `${cacheKey(media.path, `frame-${f6(time)}`)}.png`);
+  if (!existsSync(file)) {
+    const r = await run(FFMPEG, ["-hide_banner", "-y", "-ss", f6(Math.max(0, time)), "-i", media.path, "-frames:v", "1", file]);
+    if (r.code !== 0 || !existsSync(file)) throw new Error(`Frame grab failed: ${r.stderr.trim().split("\n").pop()}`);
+  }
+  return { ...(await probe(file)), name: `Freeze ${media.name}` };
 }
 
 // Ranges (source seconds) quieter than `noise` dB for at least `minDuration`.

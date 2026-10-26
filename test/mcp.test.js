@@ -67,3 +67,23 @@ test("agent workflow: import, find pauses, cut, punch-in, bleep, look, export", 
   assert.ok(existsSync(ex.path));
   assert.ok(Math.abs(ex.durationSeconds - 2) < 0.01);
 });
+
+test("agent uses the pro features", { timeout: 180000 }, async () => {
+  const cat = json(await call("catalog_list"));
+  assert.ok(cat.transitions.length >= 20 && cat.effects.some((e) => e.id === "shake"));
+  let s = json(await call("project_status"));
+  const main = s.tracks.find((t) => t.kind === "video" && t.layer === 0).clips;
+  s = json(await call("clip_set", { clipId: main[0].id, speed: 1.25, filter: { id: "horror" }, effects: [{ id: "vhs" }], animIn: { type: "zoom-in" }, adjust: { contrast: 20 }, audio: { enhance: true, voice: "deep" } }));
+  const edited = s.project.tracks.flatMap((t) => t.clips).find((c) => c.id === main[0].id);
+  assert.equal(edited.speed, 1.25);
+  assert.equal(edited.filter.id, "horror");
+  assert.equal(edited.audio.voice, "deep");
+  const second = s.project.tracks.find((t) => t.kind === "video" && t.layer === 0).clips[1];
+  s = json(await call("transition_set", { clipId: second.id, type: "circle-open", duration: 0.4 }));
+  s = json(await call("text_add", { text: "Agent title", start: 0, duration: 1.5, styleId: "yellow" }));
+  assert.ok(s.project.tracks.some((t) => t.kind === "text" && t.clips.length === 1));
+  const frame = await call("frame_render", { time: 0.8 });
+  assert.equal(frame.content[0].type, "image");
+  const ex = json(await call("export_video", { outPath: join(OUT, "mcp-pro.mp4"), codec: "hevc", range: [0, 2], resolution: 720 }));
+  assert.ok(existsSync(ex.path), JSON.stringify(ex));
+});

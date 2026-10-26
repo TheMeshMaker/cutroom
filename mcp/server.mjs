@@ -10,15 +10,19 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { importCapcutDraft } from "../core/capcut-import.js";
-import { clipEnd, createProject, CANVAS_PRESETS, formatTime, mediaById, projectDuration, trackById, videoLayers } from "../core/model.js";
+import { detectBeats } from "../core/analysis.js";
+import { captionLines } from "../core/captions.js";
+import { ADJUST_KEYS, ANIMATIONS, EFFECTS, FILTERS, FONTS, TEXT_STYLES, TRANSITIONS, VOICE_EFFECTS, byId } from "../core/catalog.js";
+import { clipById, clipEnd, createProject, CANVAS_PRESETS, formatTime, isText, mediaById, projectDuration, sourceAt, trackById, videoLayers } from "../core/model.js";
 import * as ops from "../core/ops.js";
 import { EXPORT_PRESETS } from "../core/render.js";
-import { availableEncoders, renderFrame, renderProject } from "../node/exporter.js";
-import { detectSilence, FFMPEG, probe, run } from "../node/media.js";
+import { transcribe } from "../node/captions.js";
+import { renderFrame, renderProject } from "../node/exporter.js";
+import { detectSilence, extractFrame, FFMPEG, makeReversed, probe, run, waveform } from "../node/media.js";
 import { loadProject, PROJECT_EXT, readState, saveProject, writeState } from "../node/store.js";
 
 const CAPCUT_DRAFTS = join(process.env.LOCALAPPDATA ?? homedir(), "CapCut", "User Data", "Projects", "com.lveditor.draft");
-const server = new McpServer({ name: "cutroom", version: "0.1.0" });
+const server = new McpServer({ name: "cutroom", version: "0.2.0" });
 
 let currentPath = process.env.CUTROOM_PROJECT ?? null;
 
@@ -55,23 +59,43 @@ function summarize(path, p) {
       clips: p.clips
         .filter((c) => c.trackId === t.id)
         .sort((a, b) => a.start - b.start)
-        .map((c) => ({
-          id: c.id,
-          media: mediaById(p, c.mediaId)?.name,
-          mediaId: c.mediaId,
-          start: round(c.start),
-          end: round(clipEnd(c)),
-          in: round(c.in),
-          out: round(c.out),
-          ...(c.volume !== 1 ? { volume: c.volume } : {}),
-          ...(c.muted ? { muted: true } : {}),
-          ...(c.fadeIn || c.fadeOut ? { fadeIn: c.fadeIn, fadeOut: c.fadeOut } : {}),
-          ...(c.transform.scale !== 1 || c.transform.x || c.transform.y ? { transform: c.transform } : {}),
-          ...(c.keyframes.length ? { keyframes: c.keyframes.map((k) => ({ time: round(c.start + k.t), scale: k.scale, x: k.x, y: k.y, ease: k.ease })) } : {}),
-        })),
+        .map((c) => clipSummary(p, c)),
     })),
     bleeps: p.bleeps.map((b) => ({ id: b.id, start: round(b.start), end: round(b.end) })),
     markers: p.markers.map((m) => ({ id: m.id, time: round(m.time), ...(m.end != null ? { end: round(m.end) } : {}), label: m.label })),
+  };
+}
+
+// Only what differs from defaults, so long projects stay readable.
+function clipSummary(p, c) {
+  const nonZero = (o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v));
+  const adjust = nonZero(c.adjust);
+  const crop = nonZero(c.crop);
+  const audioFx = nonZero({ ...c.audio });
+  return {
+    id: c.id,
+    ...(isText(c) ? { text: c.text, style: c.style } : { media: mediaById(p, c.mediaId)?.name, mediaId: c.mediaId, in: round(c.in), out: round(c.out) }),
+    start: round(c.start),
+    end: round(clipEnd(c)),
+    ...(c.speed !== 1 ? { speed: c.speed } : {}),
+    ...(c.volume !== 1 ? { volume: c.volume } : {}),
+    ...(c.muted ? { muted: true } : {}),
+    ...(c.fadeIn || c.fadeOut ? { fadeIn: c.fadeIn, fadeOut: c.fadeOut } : {}),
+    ...(c.transform.scale !== 1 || c.transform.x || c.transform.y || c.transform.rotation ? { transform: c.transform } : {}),
+    ...(c.opacity !== 1 ? { opacity: c.opacity } : {}),
+    ...(c.flipH || c.flipV ? { flipH: c.flipH, flipV: c.flipV } : {}),
+    ...(Object.keys(crop).length ? { crop } : {}),
+    ...(Object.keys(adjust).length ? { adjust } : {}),
+    ...(c.filter ? { filter: c.filter } : {}),
+    ...(c.lut ? { lut: c.lut } : {}),
+    ...(c.effects.length ? { effects: c.effects } : {}),
+    ...(c.chroma.enabled ? { chroma: c.chroma } : {}),
+    ...(c.stabilize.enabled ? { stabilize: c.stabilize } : {}),
+    ...(c.animIn ? { animIn: c.animIn } : {}),
+    ...(c.animOut ? { animOut: c.animOut } : {}),
+    ...(c.transition ? { transition: c.transition } : {}),
+    ...(Object.keys(audioFx).length ? { audio: audioFx } : {}),
+    ...(c.keyframes.length ? { keyframes: c.keyframes.map((k) => ({ time: round(c.start + k.t), scale: k.scale, x: k.x, y: k.y, ease: k.ease })) } : {}),
   };
 }
 
@@ -84,7 +108,7 @@ function editTool(fn) {
     const path = projectPath(args.project);
     const before = loadProject(path);
     const result = await fn(before, args);
-    const after = result?.project ?? result;
+    const after = ops.settle(result?.project ?? result);
     saveProject(path, after);
     return text({ ...(result?.note ? { note: result.note } : {}), project: summarize(path, after) });
   };
@@ -192,9 +216,12 @@ tool(
   editTool((p, { clipIds, ripple }) => ops.deleteClips(p, clipIds, { ripple: !!ripple })),
 );
 
+const ids = (list) => list.map((x) => x.id);
+const adjustShape = Object.fromEntries(Object.entries(ADJUST_KEYS).map(([k, [lo, hi]]) => [k, z.number().min(lo).max(hi).optional()]));
+
 tool(
   "clip_set",
-  "Set clip properties: volume (1 = 100%, up to 4), fades in seconds, mute, and static framing (scale 1 = fit, x/y = pan as canvas fractions, + is right/down).",
+  "Set any clip property (omit what you don't change). Framing: scale 1 = fit, x/y pan as canvas fractions (+ right/down), rotation degrees. speed 0.1-10 (pitch kept; slowing down pushes later clips). adjust values are -100..100 (fade/sharpen/vignette/grain 0..100). filter/effects/animations/voice ids come from catalog_list. Text clips also take text and style.",
   {
     ...projectArg,
     clipId: z.string(),
@@ -202,13 +229,131 @@ tool(
     fadeIn: z.number().min(0).optional(),
     fadeOut: z.number().min(0).optional(),
     muted: z.boolean().optional(),
+    speed: z.number().min(0.1).max(10).optional(),
     scale: z.number().positive().optional(),
     x: z.number().optional(),
     y: z.number().optional(),
+    rotation: z.number().optional(),
+    opacity: z.number().min(0).max(1).optional(),
+    flipH: z.boolean().optional(),
+    flipV: z.boolean().optional(),
+    crop: z.object({ l: z.number().optional(), t: z.number().optional(), r: z.number().optional(), b: z.number().optional() }).optional().describe("Canvas fractions 0..0.45 per side."),
+    adjust: z.object(adjustShape).optional(),
+    filter: z.object({ id: z.enum(ids(FILTERS)), intensity: z.number().min(0).max(100).optional() }).nullable().optional(),
+    lut: z.string().nullable().optional().describe("Path to a .cube LUT, or null."),
+    effects: z.array(z.object({ id: z.enum(ids(EFFECTS)), intensity: z.number().min(0).max(100).optional() })).optional().describe("Replaces the clip's effect list."),
+    chroma: z.object({ enabled: z.boolean().optional(), color: z.string().optional(), similarity: z.number().optional(), blend: z.number().optional() }).optional(),
+    stabilize: z.object({ enabled: z.boolean().optional(), strength: z.number().min(0).max(100).optional() }).optional(),
+    animIn: z.object({ type: z.enum(ids(ANIMATIONS)), duration: z.number().positive().optional() }).nullable().optional(),
+    animOut: z.object({ type: z.enum(ids(ANIMATIONS)), duration: z.number().positive().optional() }).nullable().optional(),
+    audio: z.object({ denoise: z.number().min(0).max(100).optional(), enhance: z.boolean().optional(), voice: z.enum(ids(VOICE_EFFECTS)).nullable().optional(), pitch: z.number().min(-12).max(12).optional(), normalize: z.boolean().optional() }).optional(),
+    text: z.string().optional(),
+    style: z.object({ font: z.enum(FONTS.map((f) => f.family)).optional(), size: z.number().optional(), color: z.string().optional(), bold: z.boolean().optional(), strokeColor: z.string().optional(), strokeWidth: z.number().optional(), bg: z.string().nullable().optional(), shadow: z.boolean().optional() }).optional(),
   },
-  editTool((p, { clipId, scale, x, y, ...rest }) => {
-    const transform = Object.fromEntries(Object.entries({ scale, x, y }).filter(([, v]) => v != null));
-    return ops.setClip(p, clipId, { ...rest, ...(Object.keys(transform).length ? { transform } : {}) });
+  editTool((p, { clipId, scale, x, y, rotation, effects, animIn, animOut, filter, ...rest }) => {
+    const transform = Object.fromEntries(Object.entries({ scale, x, y, rotation }).filter(([, v]) => v != null));
+    const patch = { ...rest };
+    if (Object.keys(transform).length) patch.transform = transform;
+    if (effects) patch.effects = effects.map((e) => ({ intensity: 60, ...e }));
+    if (filter !== undefined) patch.filter = filter && { intensity: 100, ...filter };
+    if (animIn !== undefined) patch.animIn = animIn && { duration: 0.5, ...animIn };
+    if (animOut !== undefined) patch.animOut = animOut && { duration: 0.5, ...animOut };
+    return ops.setClip(p, clipId, patch);
+  }),
+);
+
+tool(
+  "catalog_list",
+  "List the ids you can use: filters (looks), effects, transitions, in/out animations, voice effects, text styles and fonts.",
+  {},
+  async () =>
+    text({
+      filters: FILTERS.map((x) => ({ id: x.id, name: x.name })),
+      effects: EFFECTS.map((x) => ({ id: x.id, name: x.name })),
+      transitions: TRANSITIONS.map((x) => ({ id: x.id, name: x.name })),
+      animations: ANIMATIONS.map((x) => ({ id: x.id, name: x.name })),
+      voiceEffects: VOICE_EFFECTS.map((x) => ({ id: x.id, name: x.name })),
+      textStyles: TEXT_STYLES.map((x) => ({ id: x.id, name: x.name })),
+      fonts: FONTS.map((f) => f.family),
+      adjust: ADJUST_KEYS,
+    }),
+);
+
+tool(
+  "text_add",
+  "Add a text clip (title, label, caption). y is a canvas fraction (+ down; 0.3 = lower third). Pick a styleId from catalog_list or pass style fields.",
+  { ...projectArg, text: z.string(), start: z.number().min(0), duration: z.number().positive().optional(), styleId: z.enum(ids(TEXT_STYLES)).optional(), x: z.number().optional(), y: z.number().optional(), trackId: z.string().optional() },
+  editTool((p, { text: body, start, duration = 3, styleId, x = 0, y = 0.3, trackId }) => ops.addText(p, { text: body, start, duration, x, y, trackId, style: styleId ? byId(TEXT_STYLES, styleId).style : {} }).project),
+);
+
+tool(
+  "transition_set",
+  "Put a transition on the cut before clipId (it must touch the previous clip on its track). type null removes it.",
+  { ...projectArg, clipId: z.string(), type: z.enum(ids(TRANSITIONS)).nullable(), duration: z.number().min(0.1).max(3).optional() },
+  editTool((p, { clipId, type, duration = 0.5 }) => ops.setTransition(p, clipId, type ? { type, duration } : null)),
+);
+
+tool(
+  "clip_reverse",
+  "Play a clip backwards (renders a reversed copy of its source range once, then points the clip at it).",
+  { ...projectArg, clipId: z.string() },
+  editTool(async (p, { clipId }) => {
+    const c = clipById(p, clipId);
+    if (!c || isText(c)) throw new Error("Pick a video or audio clip");
+    const info = await makeReversed(mediaById(p, c.mediaId), c.in, c.out);
+    const r = ops.addMedia(p, info);
+    return ops.replaceClipMedia(r.project, clipId, r.media.id, { in: 0, out: info.duration, reverseKeyframes: true });
+  }),
+);
+
+tool(
+  "clip_freeze",
+  "Freeze frame: split the clip at a timeline time and hold that frame for `duration` seconds (later clips on the track move right).",
+  { ...projectArg, clipId: z.string(), time: z.number(), duration: z.number().positive().optional() },
+  editTool(async (p, { clipId, time, duration = 3 }) => {
+    const c = clipById(p, clipId);
+    if (!c || isText(c)) throw new Error("Pick a video clip");
+    const still = await extractFrame(mediaById(p, c.mediaId), sourceAt(c, time));
+    const r = ops.addMedia(p, still);
+    return ops.insertFreeze(r.project, clipId, time, r.media.id, duration);
+  }),
+);
+
+tool(
+  "audio_extract",
+  "Move a video clip's sound onto its own audio track (the video clip is muted).",
+  { ...projectArg, clipId: z.string() },
+  editTool((p, { clipId }) => ops.extractAudio(p, clipId)),
+);
+
+tool(
+  "captions_generate",
+  "Auto captions: transcribe a media item's speech locally (faster-whisper large-v3, GPU) and add caption text clips on a new Captions track, following the edit (cut-out words are dropped).",
+  { ...projectArg, mediaId: z.string().optional().describe("Defaults to the first audio-only media on the timeline, else the first with audio."), language: z.string().optional().describe("ISO code like en or ar; default auto-detect."), styleId: z.enum(ids(TEXT_STYLES)).optional(), maxChars: z.number().int().min(8).max(80).optional() },
+  editTool(async (p, { mediaId, language = "auto", styleId = "subtitle", maxChars = 32 }) => {
+    const used = new Set(p.clips.map((c) => c.mediaId));
+    const audible = p.media.filter((m) => used.has(m.id) && m.hasAudio);
+    const media = mediaId ? mediaById(p, mediaId) : (audible.find((m) => !m.hasVideo) ?? audible[0]);
+    if (!media) throw new Error("No media with audio on the timeline");
+    const result = await transcribe(media, { language });
+    const lines = captionLines(p, media.id, result.segments, { maxChars });
+    if (!lines.length) throw new Error("No speech found");
+    return { project: ops.addTextTrack(p, lines, { name: "Captions", style: byId(TEXT_STYLES, styleId).style }).project, note: `${lines.length} captions, language ${result.language}` };
+  }),
+);
+
+tool(
+  "beats_detect",
+  "Mark the beats of a music clip on the timeline (markers labeled beat), for cutting to the rhythm.",
+  { ...projectArg, clipId: z.string(), sensitivity: z.number().min(0).max(1).optional() },
+  editTool(async (p, { clipId, sensitivity = 0.5 }) => {
+    const c = clipById(p, clipId);
+    if (!c || isText(c)) throw new Error("Pick a clip with audio");
+    const wave = await waveform(mediaById(p, c.mediaId));
+    const times = detectBeats(wave, { sensitivity })
+      .filter((t) => t >= c.in && t < c.out)
+      .map((t) => c.start + (t - c.in) / c.speed);
+    return { project: ops.addMarkers(p, times.map((time) => ({ time, label: "beat", color: "beat" }))), note: `${times.length} beats` };
   }),
 );
 
@@ -352,27 +497,27 @@ tool(
 
 tool(
   "export_video",
-  "Render the project (or a timeline range) to an H.264 MP4 with FFmpeg. Presets: landscape (project canvas), shorts-square (1080x1920 with the centered square over blurred footage), vertical-fill.",
+  "Render the project (or a timeline range) with FFmpeg. Presets: landscape (project canvas), shorts-square (1080x1920 with the centered square over blurred footage), vertical-fill. codec h264/hevc/av1 (.mp4) or prores (.mov); hardware auto picks the GPU encoder when available; resolution is the output's short side (720/1080/1440/2160).",
   {
     ...projectArg,
     outPath: z.string(),
     preset: z.enum(Object.keys(EXPORT_PRESETS)).optional(),
     background: z.enum(["blur", "black"]).optional(),
     range: z.tuple([z.number(), z.number()]).optional(),
-    encoder: z.enum(["x264", "nvenc", "qsv", "amf"]).optional(),
+    codec: z.enum(["h264", "hevc", "av1", "prores"]).optional(),
+    hardware: z.enum(["auto", "cpu", "nvenc", "qsv", "amf"]).optional(),
+    quality: z.enum(["high", "recommended", "compact"]).optional(),
+    resolution: z.number().int().positive().optional(),
+    fps: z.number().positive().optional(),
   },
-  async ({ project, outPath, preset, background, range, encoder }, extra) => {
+  async ({ project, outPath, ...settings }, extra) => {
     const path = projectPath(project);
     const p = loadProject(path);
-    if (encoder && encoder !== "x264" && !(await availableEncoders()).includes(encoder)) throw new Error(`Encoder ${encoder} is not available in this FFmpeg build`);
     const token = extra?._meta?.progressToken;
     let last = 0;
     const r = await renderProject(p, {
+      ...settings,
       outPath: resolve(outPath),
-      preset,
-      background,
-      range,
-      encoder,
       signal: extra?.signal,
       onProgress: (x) => {
         if (token == null || x - last < 0.02) return;
@@ -380,7 +525,7 @@ tool(
         extra.sendNotification({ method: "notifications/progress", params: { progressToken: token, progress: Math.round(x * 100), total: 100 } }).catch(() => {});
       },
     });
-    return text({ path: r.path, durationSeconds: round(r.duration), renderSeconds: round(r.seconds) });
+    return text({ path: r.path, encoder: r.encoder, durationSeconds: round(r.duration), renderSeconds: round(r.seconds) });
   },
 );
 

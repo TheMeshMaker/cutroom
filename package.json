@@ -1,6 +1,6 @@
 {
   "name": "cutroom",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "A CapCut-style desktop video editor with pro features, local auto captions and a built-in MCP server.",
   "author": "TheMeshMaker",
@@ -36,7 +36,10 @@
     "appId": "com.themeshmaker.cutroom",
     "productName": "Cutroom",
     "copyright": "Copyright © 2026 TheMeshMaker",
-    "directories": { "output": "release", "buildResources": "build" },
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
     "files": [
       "dist/**",
       "electron/**",
@@ -46,12 +49,29 @@
       "package.json",
       "!**/node_modules/**"
     ],
-    "asarUnpack": ["scripts/transcribe.py"],
-    "extraResources": [{ "from": "vendor/ffmpeg", "to": "ffmpeg" }],
+    "asarUnpack": [
+      "scripts/transcribe.py"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/ffmpeg",
+        "to": "ffmpeg"
+      }
+    ],
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "zip", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
       "icon": "build/icon.png",
       "artifactName": "Cutroom-${version}-early-access-win-x64-portable.${ext}"

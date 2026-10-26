@@ -2,7 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from "electron";
 import { createHash } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, extname, join } from "node:path";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { importCapcutDraft } from "../core/capcut-import.js";
@@ -73,9 +73,21 @@ function openProjectFile(path) {
 }
 
 // Recent projects for the Projects home (newest first).
+// One entry per file, however its path was written (relative, slashes, case).
+const projectKey = (p) => resolve(p).replace(/\\/g, "/").toLowerCase();
+
+function uniqueProjects(paths) {
+  const seen = new Set();
+  return paths.filter((p) => {
+    const k = projectKey(p);
+    return !seen.has(k) && seen.add(k);
+  });
+}
+
 function rememberProject(path) {
-  const recent = (readState().recentProjects ?? []).filter((p) => p !== path);
-  writeState({ lastProject: path, recentProjects: [path, ...recent].slice(0, 40) });
+  const full = resolve(path);
+  const recent = (readState().recentProjects ?? []).filter((p) => projectKey(p) !== projectKey(full));
+  writeState({ lastProject: full, recentProjects: [full, ...recent].slice(0, 40) });
 }
 
 function closeProject() {
@@ -150,7 +162,7 @@ handle("backups:restore", (path, file) => {
 
 handle("projects:list", () => {
   const st = readState();
-  const paths = [...new Set([...(st.recentProjects ?? []), ...(st.lastProject ? [st.lastProject] : [])])];
+  const paths = uniqueProjects([...(st.recentProjects ?? []), ...(st.lastProject ? [st.lastProject] : [])]).map((p) => resolve(p));
   return paths.map((path) => {
     if (!existsSync(path)) return { path, missing: true, name: basename(path).replace(PROJECT_EXT, "") };
     try {
@@ -177,7 +189,9 @@ handle("projects:thumb", async (path) => {
 });
 
 handle("projects:forget", (path) => {
-  writeState({ recentProjects: (readState().recentProjects ?? []).filter((p) => p !== path) });
+  const st = readState();
+  const keep = (p) => p && projectKey(p) !== projectKey(path);
+  writeState({ recentProjects: (st.recentProjects ?? []).filter(keep), ...(st.lastProject && !keep(st.lastProject) ? { lastProject: null } : {}) });
   return true;
 });
 

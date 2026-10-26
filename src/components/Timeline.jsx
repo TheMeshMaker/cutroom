@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { TEXT_STYLES, byId } from "../../core/catalog.js";
-import { clipEnd, clipLength, formatTime, isText, mainTrack, mediaById, projectDuration, trackById } from "../../core/model.js";
+import { clipEnd, clipLength, formatTime, hasMedia, isText, mainTrack, mediaById, projectDuration, sourceAt, trackById } from "../../core/model.js";
 import * as ops from "../../core/ops.js";
 import { EMPTY_SELECTION, useEditor } from "../editor.js";
-import { mediaUrl, playhead, playing, useStore } from "../state.js";
+import { mediaUrl, playhead, playing, sourceControl, useStore } from "../state.js";
 import Icon from "./icons.jsx";
 
 const HEADER_W = 132;
@@ -146,6 +146,11 @@ export default function Timeline() {
     });
   };
 
+  // Floating readout while a trim tool drags ("Roll +0.40 s", "Speed 1.5×").
+  const [hint, setHint] = useState(null);
+  const touching = (c, side) =>
+    project.clips.find((k) => k.trackId === c.trackId && k.id !== c.id && (side === "prev" ? Math.abs(clipEnd(k) - c.start) < 0.02 : Math.abs(k.start - clipEnd(c)) < 0.02));
+
   const onClipDown = (e, c, mode) => {
     const track = trackById(project, c.trackId);
     if (track.locked) return;
@@ -155,7 +160,41 @@ export default function Timeline() {
       return;
     }
     if (!selection.clips.includes(c.id)) selectClip(e, c);
-    const media = !isText(c) && mediaById(project, c.mediaId);
+    const media = hasMedia(c) && mediaById(project, c.mediaId);
+    const show = (ev, text) => setHint({ x: ev.clientX, y: ev.clientY, text });
+    const sign = (v) => `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(2)} s`;
+
+    // Roll: drag an edge that touches a neighbour to move the cut between them.
+    if (tool === "roll" && mode !== "move") {
+      const pair = mode === "trim-l" ? [touching(c, "prev"), c] : [c, touching(c, "next")];
+      if (pair[0] && pair[1]) {
+        return startDrag(e, {
+          compute: (dt, ev) => (show(ev, `Roll ${sign(dt)}`), { type: "roll", dt }),
+          done: (g) => (setHint(null), apply((p) => ops.rollEdit(p, pair[0].id, pair[1].id, g.dt))),
+        });
+      }
+    }
+    // Slip: drag the clip body to show an earlier/later part of its source.
+    if (tool === "slip" && mode === "move" && media) {
+      return startDrag(e, {
+        click: () => selectClip(e, c),
+        compute: (dt, ev) => (show(ev, `Slip ${sign(-dt * c.speed)}`), { type: "slip", dt }),
+        done: (g) => (setHint(null), apply((p) => ops.slipClip(p, c.id, -g.dt * c.speed))),
+      });
+    }
+    // Rate stretch: drag the right edge to change speed instead of trimming.
+    if (tool === "rate" && mode === "trim-r" && media && media.kind !== "image") {
+      return startDrag(e, {
+        compute: (dt, ev) => {
+          const len = Math.max(0.1, clipLength(c) + dt);
+          const speed = Math.min(10, Math.max(0.1, (c.out - c.in) / len));
+          show(ev, `Speed ${speed.toFixed(2)}×`);
+          return { type: "clip", id: c.id, speed };
+        },
+        done: (g) => (setHint(null), apply((p) => ops.setClip(p, c.id, { speed: Math.round(g.speed * 100) / 100 }))),
+      });
+    }
+
     startDrag(e, {
       click: () => selectClip(e, c),
       compute: (dt, ev) => {
@@ -170,12 +209,12 @@ export default function Timeline() {
         }
         if (mode === "trim-l") {
           const s = snapT(c.start + dt, c.id).t;
-          if (isText(c)) return { type: "clip", id: c.id, start: Math.min(s, clipEnd(c) - 0.1), out: c.out - (Math.min(s, clipEnd(c) - 0.1) - c.start) };
+          if (!media) return { type: "clip", id: c.id, start: Math.min(s, clipEnd(c) - 0.1), out: c.out - (Math.min(s, clipEnd(c) - 0.1) - c.start) };
           const inn = Math.min(Math.max(0, c.in + (s - c.start) * c.speed), c.out - 0.05);
           return { type: "clip", id: c.id, in: inn, start: c.start + (inn - c.in) / c.speed };
         }
         const e2 = snapT(clipEnd(c) + dt, c.id).t;
-        if (isText(c)) return { type: "clip", id: c.id, out: Math.max(0.1, e2 - c.start) };
+        if (!media) return { type: "clip", id: c.id, out: Math.max(0.1, e2 - c.start) };
         const max = media.duration > 0 && media.kind !== "image" ? media.duration : Infinity;
         return { type: "clip", id: c.id, out: Math.min(max, Math.max(c.in + 0.05, c.in + (e2 - c.start) * c.speed)) };
       },
@@ -184,8 +223,32 @@ export default function Timeline() {
           const toMain = g.trackId === main.id && trackById(project, c.trackId).kind === "video";
           if (magnet && toMain) apply((p) => ops.insertOnTrack(p, c.id, g.pointerT, main.id));
           else apply((p) => ops.moveClip(p, c.id, { start: g.start, trackId: g.trackId }));
-        } else if (mode === "trim-l") apply((p) => ops.trimClip(p, c.id, isText(c) ? { in: g.start - c.start } : { in: g.in }));
+        } else if (mode === "trim-l") apply((p) => ops.trimClip(p, c.id, !media ? { in: g.start - c.start } : { in: g.in }));
         else apply((p) => ops.trimClip(p, c.id, { out: g.out }));
+      },
+    });
+  };
+
+  // Fade handles on a clip's top corners: drag inward to fade in/out. Video
+  // fades the picture and its sound together; audio fades the sound.
+  const onFadeDown = (e, c, side) => {
+    const track = trackById(project, c.trackId);
+    if (track.locked) return;
+    const len = clipLength(c);
+    const cur = side === "in" ? Math.max(c.fadeIn, c.animIn?.type === "fade" ? c.animIn.duration : 0) : Math.max(c.fadeOut, c.animOut?.type === "fade" ? c.animOut.duration : 0);
+    startDrag(e, {
+      compute: (dt, ev) => {
+        const d = Math.min(len * 0.9, Math.max(0, cur + (side === "in" ? dt : -dt)));
+        setHint({ x: ev.clientX, y: ev.clientY, text: `Fade ${side} ${d.toFixed(2)} s` });
+        return { type: "fade", id: c.id, d };
+      },
+      done: (g) => {
+        setHint(null);
+        const d = Math.round(g.d * 100) / 100;
+        const patch = {};
+        if (track.kind !== "audio") patch[side === "in" ? "animIn" : "animOut"] = d > 0.02 ? { type: "fade", duration: d } : null;
+        if (track.kind !== "text") patch[side === "in" ? "fadeIn" : "fadeOut"] = d;
+        apply((p) => ops.setClip(p, c.id, patch));
       },
     });
   };
@@ -263,7 +326,10 @@ export default function Timeline() {
       <div className="tl-toolbar">
         <div className="seg tools">
           <button className={tool === "select" ? "active" : ""} onClick={() => setTool("select")} title="Select (A)"><Icon name="cursor" /></button>
-          <button className={tool === "blade" ? "active" : ""} onClick={() => setTool("blade")} title="Split tool (B): click a clip to cut it"><Icon name="blade" /></button>
+          <button className={tool === "blade" ? "active" : ""} onClick={() => setTool("blade")} title="Split tool: click a clip to cut it"><Icon name="blade" /></button>
+          <button className={tool === "roll" ? "active" : ""} onClick={() => setTool("roll")} title="Roll: drag a cut to move it (both clips adjust)"><Icon name="roll" /></button>
+          <button className={tool === "slip" ? "active" : ""} onClick={() => setTool("slip")} title="Slip: drag a clip to show a different part of it"><Icon name="slip" /></button>
+          <button className={tool === "rate" ? "active" : ""} onClick={() => setTool("rate")} title="Rate stretch: drag a clip's end to speed it up or slow it down"><Icon name="rate" /></button>
         </div>
         <span className="divider" />
         <button className="ghost icon-only" onClick={undo} disabled={!canUndo} title="Undo (Ctrl+Z)"><Icon name="undo" /></button>
@@ -278,6 +344,8 @@ export default function Timeline() {
         <button className="ghost icon-only" onClick={actions.reverse} title="Reverse"><Icon name="reverse" /></button>
         <button className="ghost icon-only" onClick={actions.mirror} title="Mirror"><Icon name="mirror" /></button>
         <button className="ghost icon-only" onClick={actions.rotate} title="Rotate 90°"><Icon name="rotate" /></button>
+        <button className="ghost icon-only" onClick={actions.scenes} title="Split at scene changes"><Icon name="scenes" /></button>
+        <button className="ghost icon-only" onClick={actions.closeGaps} title="Close all gaps"><Icon name="gap" /></button>
         <span className="divider" />
         <button className="ghost small" onClick={() => actions.punchIn()} title="Punch-in zoom at playhead (P)"><Icon name="zoom" /> Punch-in</button>
         <button className="ghost small" onClick={actions.bleep} title="Bleep at playhead or I–O range (Shift+B)"><Icon name="bleep" /> Bleep</button>
@@ -314,7 +382,21 @@ export default function Timeline() {
                   <span>{fmt(t)}</span>
                 </div>
               ))}
-              {flags.map((m) => <div key={m.id} className={`flag ${m.color}`} style={{ left: m.time * pps }} title={m.label || "Marker"} />)}
+              {flags.map((m) => (
+                <div
+                  key={m.id}
+                  className={`flag ${m.color} ${selection.markers.includes(m.id) ? "selected" : ""}`}
+                  style={{ left: m.time * pps }}
+                  title={`${m.label || "Marker"} (double-click to jump)`}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    setSelection({ ...EMPTY_SELECTION, markers: [m.id] });
+                  }}
+                  onDoubleClick={() => playhead.set(m.time)}
+                >
+                  {m.label && m.label !== "beat" && pps * 4 > m.label.length * 6 && <span>{m.label}</span>}
+                </div>
+              ))}
             </div>
           </div>
 
@@ -382,7 +464,7 @@ export default function Timeline() {
                 </div>
                 <div className={`tl-lane ${track.hidden ? "dim" : ""} ${track.locked ? "locked" : ""}`} onPointerDown={onLaneDown} onDragOver={allowDrop} onDrop={(e) => onDrop(e, track, null)}>
                   {clips.map((c) => (
-                    <Clip key={c.id} c={c} track={track} isMain={isMain} h={h} pps={pps} selected={selection.clips.includes(c.id)} onDown={onClipDown} onDrop={onDrop} allowDrop={allowDrop} project={project} waves={waves} strips={strips} original={project.clips.find((x) => x.id === c.id)} />
+                    <Clip key={c.id} c={c} track={track} isMain={isMain} h={h} pps={pps} selected={selection.clips.includes(c.id)} onDown={onClipDown} onFade={onFadeDown} onOpen={(k) => (actions.openSource(k.mediaId), setTimeout(() => sourceControl.current?.seek(sourceAt(k, Math.min(Math.max(playhead.get(), k.start), clipEnd(k) - 0.01))), 300))} onDrop={onDrop} allowDrop={allowDrop} project={project} waves={waves} strips={strips} original={project.clips.find((x) => x.id === c.id)} />
                   ))}
                   {clips.filter((c) => c.transition).map((c) => (
                     <button
@@ -408,51 +490,66 @@ export default function Timeline() {
             {tool === "blade" && hoverX != null && <div className="blade-line" style={{ left: hoverX * pps }} />}
           </div>
           <Playhead pps={pps} scrollRef={scrollRef} />
+          {hint && (
+            <div className="drag-hint" style={{ left: hint.x + 14, top: hint.y - 28 }}>
+              {hint.text}
+            </div>
+          )}
         </div>
       </div>
     </section>
   );
 }
 
-function Clip({ c, track, isMain, h, pps, selected, onDown, onDrop, allowDrop, project, waves, strips, original }) {
+function Clip({ c, track, isMain, h, pps, selected, onDown, onFade, onOpen, onDrop, allowDrop, project, waves, strips, original }) {
   const text = isText(c);
-  const media = !text && mediaById(project, c.mediaId);
-  const len = text ? c.out - c.in : (c.out - c.in) / c.speed;
+  const adj = !!c.adjustment;
+  const media = hasMedia(c) && mediaById(project, c.mediaId);
+  const len = !media ? c.out - c.in : (c.out - c.in) / c.speed;
   const w = Math.max(2, len * pps);
   const wave = media && waves[c.mediaId];
   const strip = media && strips[c.mediaId];
   const badges = [];
   if (!text) {
-    if (Math.abs(c.speed - 1) > 1e-3) badges.push(`${c.speed.toFixed(2).replace(/\.?0+$/, "")}×`);
-    if (c.volume !== 1) badges.push(`${Math.round(c.volume * 100)}%`);
-    if (c.filter) badges.push("filter");
+    if (media && Math.abs(c.speed - 1) > 1e-3) badges.push(`${c.speed.toFixed(2).replace(/\.?0+$/, "")}×`);
+    if (media && c.volume !== 1) badges.push(`${Math.round(c.volume * 100)}%`);
+    if (c.filter) badges.push("look");
+    if (["lift", "gamma", "gain", "offset"].some((k) => c.color[k].x || c.color[k].y || c.color[k].l) || c.color.curve.length > 2) badges.push("grade");
     if (c.effects.length) badges.push(`${c.effects.length} fx`);
-    if (c.animIn || c.animOut) badges.push("anim");
     if (c.chroma.enabled) badges.push("key");
     if (media?.derivedFrom) badges.push("rev");
   }
+  const fi = Math.max(c.fadeIn, c.animIn?.type === "fade" ? c.animIn.duration : 0);
+  const fo = Math.max(c.fadeOut, c.animOut?.type === "fade" ? c.animOut.duration : 0);
   return (
     <div
-      className={`clip ${track.kind} ${media?.kind ?? "text"} ${selected ? "selected" : ""} ${c.muted ? "muted" : ""}`}
+      className={`clip ${track.kind} ${adj ? "adjustment" : media?.kind ?? "text"} ${selected ? "selected" : ""} ${c.muted ? "muted" : ""}`}
       style={{ left: c.start * pps, width: w }}
       onPointerDown={(e) => onDown(e, original, "move")}
+      onDoubleClick={() => media && onOpen(original)}
       onDragOver={allowDrop}
       onDrop={(e) => onDrop(e, track, original)}
-      title={text ? c.text : `${media?.name}\n${formatTime(c.start, project.canvas.fps)} → ${formatTime(c.start + len, project.canvas.fps)} (${len.toFixed(2)} s)`}
+      title={text ? c.text : adj ? "Adjustment layer: grades everything below it" : `${media?.name}\n${formatTime(c.start, project.canvas.fps)} → ${formatTime(c.start + len, project.canvas.fps)} (${len.toFixed(2)} s)\nDouble-click: open in source monitor`}
     >
       {track.kind === "video" && strip && <Filmstrip strip={strip} clip={c} width={w} height={isMain ? h - 26 : h - 22} pps={pps} />}
       <div className="clip-label">
-        <span className="clip-name">{text ? c.text : media?.name}</span>
-        {!text && <span className="clip-dur">{formatTime(len, project.canvas.fps)}</span>}
+        <span className="clip-name">{text ? c.text : adj ? "Adjustment layer" : media?.name}</span>
+        {media && <span className="clip-dur">{formatTime(len, project.canvas.fps)}</span>}
         {badges.map((b) => <span key={b} className="badge">{b}</span>)}
       </div>
       {wave && media?.hasAudio && w > 24 && <Wave wave={wave} from={c.in} to={c.out} width={w} kind={track.kind} />}
       {c.keyframes.map((k, i) => <span key={i} className="kf" style={{ left: k.t * pps }} title={`${k.scale.toFixed(2)}×`} />)}
-      {(c.fadeIn > 0 || c.fadeOut > 0) && (
+      {(fi > 0 || fo > 0) && (
         <svg className="fades" width={w} height="100%" preserveAspectRatio="none" viewBox={`0 0 ${w} 10`}>
-          {c.fadeIn > 0 && <polygon points={`0,0 ${c.fadeIn * pps},0 0,10`} />}
-          {c.fadeOut > 0 && <polygon points={`${w},0 ${w - c.fadeOut * pps},0 ${w},10`} />}
+          {fi > 0 && <polygon points={`0,0 ${fi * pps},0 0,10`} />}
+          {fo > 0 && <polygon points={`${w},0 ${w - fo * pps},0 ${w},10`} />}
         </svg>
+      )}
+      {!adj && w > 30 && (
+        <>
+          <span className="fade-handle l" style={{ left: Math.min(w - 10, fi * pps) }} onPointerDown={(e) => onFade(e, original, "in")} title="Drag to fade in" />
+          <span className="fade-handle r" style={{ right: Math.min(w - 10, fo * pps) }} onPointerDown={(e) => onFade(e, original, "out")} title="Drag to fade out" />
+        </>
       )}
       <div className="handle l" onPointerDown={(e) => onDown(e, original, "trim-l")} />
       <div className="handle r" onPointerDown={(e) => onDown(e, original, "trim-r")} />

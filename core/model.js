@@ -40,6 +40,13 @@ export function createProject({ name = "Untitled", canvas = "1080p" } = {}) {
 }
 
 const TRACK_NAMES = { video: "Video", audio: "Audio", text: "Text" };
+export const ROLES = ["dialogue", "music", "sfx", "ambience"];
+
+const wheel = (w) => ({ x: clamp(num(w?.x, 0), -1, 1), y: clamp(num(w?.y, 0), -1, 1), l: clamp(num(w?.l, 0), -1, 1) });
+export const DEFAULT_CURVE = [
+  [0, 0],
+  [1, 1],
+];
 
 // Fill defaults and drop malformed entries. Used on every load so a project
 // edited by hand or by an agent is always safe to render.
@@ -56,7 +63,8 @@ export function normalizeProject(input) {
   };
   // Editor settings that change how edits behave, saved with the project so
   // the app and the MCP server agree. magnet: the main track never has gaps.
-  p.settings = { magnet: p.settings?.magnet !== false };
+  // loudness: master loudness target in LUFS applied on export (null = off).
+  p.settings = { magnet: p.settings?.magnet !== false, loudness: Number.isFinite(p.settings?.loudness) ? clamp(p.settings.loudness, -30, -8) : null };
   p.media = (Array.isArray(p.media) ? p.media : [])
     .filter((m) => m && typeof m.path === "string")
     .map((m) => ({
@@ -81,6 +89,13 @@ export function normalizeProject(input) {
       muted: !!t.muted,
       hidden: !!t.hidden,
       locked: !!t.locked,
+      // Mixer: fader (1 = 0 dB), pan (-1 left .. 1 right), solo, sound role
+      // and auto-ducking under dialogue.
+      volume: clamp(num(t.volume, 1), 0, 2),
+      pan: clamp(num(t.pan, 0), -1, 1),
+      solo: !!t.solo,
+      role: ROLES.includes(t.role) ? t.role : null,
+      duck: { enabled: !!t.duck?.enabled, amount: clamp(num(t.duck?.amount, 60), 0, 100) },
     }));
   if (!p.tracks.some((t) => t.kind === "video"))
     p.tracks.push({ id: "v1", kind: "video", name: "Main", muted: false, hidden: false, locked: false });
@@ -90,9 +105,23 @@ export function normalizeProject(input) {
     .filter((k) => {
       if (!k || !trackKind.has(k.trackId)) return false;
       if (trackKind.get(k.trackId) === "text") return typeof k.text === "string";
+      if (trackKind.get(k.trackId) === "video" && k.adjustment === true) return true;
       return mediaIds.has(k.mediaId);
     })
     .map((k) => normalizeClip(k, trackKind.get(k.trackId), p.canvas.fps));
+  // Word-level transcripts per media item (source seconds), for text-based
+  // editing and captions.
+  const transcripts = {};
+  for (const [id, t] of Object.entries(p.transcripts ?? {})) {
+    if (!mediaIds.has(id) || !Array.isArray(t?.words)) continue;
+    transcripts[id] = {
+      language: t.language ?? "",
+      words: t.words.filter((w) => w && Number.isFinite(w.s) && Number.isFinite(w.e) && typeof w.w === "string").map((w) => ({ s: w.s, e: Math.max(w.s, w.e), w: w.w })),
+    };
+  }
+  p.transcripts = transcripts;
+  // Saved render-queue jobs (Deliver page).
+  p.deliver = (Array.isArray(p.deliver) ? p.deliver : []).filter((j) => j && typeof j.name === "string").map((j) => ({ id: j.id ?? uid("j"), ...j }));
   p.bleeps = (Array.isArray(p.bleeps) ? p.bleeps : [])
     .filter((b) => b && num(b.end, 0) > num(b.start, 0))
     .map((b) => ({ id: b.id ?? uid("b"), start: Math.max(0, b.start), end: b.end }))
@@ -111,7 +140,8 @@ export function normalizeProject(input) {
 }
 
 function normalizeClip(k, kind, fps) {
-  const isText = kind === "text";
+  const adjustmentLayer = kind === "video" && k.adjustment === true;
+  const isText = kind === "text" || adjustmentLayer; // both have no media: in = 0, out = length
   const inn = isText ? 0 : Math.max(0, num(k.in, 0));
   const out = Math.max(inn + 1 / fps, num(k.out, inn + (isText ? 3 : 1)));
   const tr = k.transform ?? {};
@@ -121,10 +151,17 @@ function normalizeClip(k, kind, fps) {
   const af = k.audio ?? {};
   const adjust = {};
   for (const [key, [lo, hi]] of Object.entries(ADJUST_KEYS)) adjust[key] = clamp(num(k.adjust?.[key], 0), lo, hi);
+  const col = k.color ?? {};
+  const curve = Array.isArray(col.curve) && col.curve.length >= 2
+    ? col.curve.filter((pt) => Array.isArray(pt) && pt.every(Number.isFinite)).map(([x, y]) => [clamp(x, 0, 1), clamp(y, 0, 1)]).sort((a, b) => a[0] - b[0])
+    : DEFAULT_CURVE;
   const clip = {
     id: k.id ?? uid("c"),
     trackId: k.trackId,
-    ...(isText ? { text: k.text, style: { ...DEFAULT_TEXT_STYLE, ...(k.style ?? {}) } } : { mediaId: k.mediaId }),
+    ...(adjustmentLayer ? { adjustment: true } : kind === "text" ? { text: k.text, style: { ...DEFAULT_TEXT_STYLE, ...(k.style ?? {}) } } : { mediaId: k.mediaId }),
+    // Primary color wheels: puck x/y (color push) and l (luminance) each.
+    color: { lift: wheel(col.lift), gamma: wheel(col.gamma), gain: wheel(col.gain), offset: wheel(col.offset), curve: curve.length >= 2 ? curve : DEFAULT_CURVE },
+    videoDenoise: clamp(num(k.videoDenoise, 0), 0, 100),
     start: Math.max(0, num(k.start, 0)),
     in: inn,
     out,
@@ -176,6 +213,9 @@ function animOf(a) {
 export const clipLength = (clip) => (clip.out - clip.in) / (clip.speed || 1);
 export const clipEnd = (clip) => clip.start + clipLength(clip);
 export const isText = (clip) => typeof clip.text === "string";
+export const isAdjustment = (clip) => clip.adjustment === true;
+// Clips that play a media file (not text or adjustment layers).
+export const hasMedia = (clip) => typeof clip.mediaId === "string";
 // Source time shown at timeline time `t` within the clip.
 export const sourceAt = (clip, t) => clip.in + (t - clip.start) * (clip.speed || 1);
 

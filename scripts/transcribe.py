@@ -34,8 +34,12 @@ def emit(obj) -> None:
     print(json.dumps(obj, ensure_ascii=False), flush=True)
 
 
-def run(model, path, language):
-    segments, info = model.transcribe(path, language=language, vad_filter=True, word_timestamps=True)
+# Whisper tends to drop hesitations; a disfluent prompt makes it keep them.
+FILLER_PROMPT = "Umm, let me think like, hmm... Okay, uh, here's what I'm, like, thinking."
+
+
+def run(model, path, language, fillers=False):
+    segments, info = model.transcribe(path, language=language, vad_filter=True, word_timestamps=True, initial_prompt=FILLER_PROMPT if fillers else None)
     total = info.duration or 1.0
     out = []
     for s in segments:
@@ -57,6 +61,7 @@ def main() -> int:
     ap.add_argument("--model", default="large-v3")
     ap.add_argument("--language", default="auto")
     ap.add_argument("--device", default="auto")
+    ap.add_argument("--fillers", action="store_true", help="keep um/uh (for text-based editing)")
     args = ap.parse_args()
     language = None if args.language in ("", "auto") else args.language
 
@@ -65,12 +70,12 @@ def main() -> int:
 
     if args.device in ("auto", "cuda"):
         try:
-            lang, segs = run(WhisperModel(args.model, device="cuda", compute_type="float16"), args.path, language)
+            lang, segs = run(WhisperModel(args.model, device="cuda", compute_type="float16"), args.path, language, args.fillers)
             emit({"language": lang, "segments": segs, "device": "cuda"})
             return 0
         except Exception as exc:  # no GPU, or CUDA runtime DLLs missing
             emit({"note": f"GPU unavailable ({str(exc).splitlines()[0]}); using CPU"})
-    lang, segs = run(WhisperModel(args.model, device="cpu", compute_type="int8"), args.path, language)
+    lang, segs = run(WhisperModel(args.model, device="cpu", compute_type="int8"), args.path, language, args.fillers)
     emit({"language": lang, "segments": segs, "device": "cpu"})
     return 0
 

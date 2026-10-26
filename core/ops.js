@@ -2,12 +2,12 @@
 // normalized project; inputs are never mutated. The UI and the MCP server both
 // call these, so behavior is identical whichever side makes the edit.
 
-import { TRANSITIONS, byId } from "./catalog.js";
+import { TITLE_TEMPLATES, TRANSITIONS, byId } from "./catalog.js";
 import {
   clipById,
   clipEnd,
   clipLength,
-  isText,
+  hasMedia,
   mainTrack,
   mediaById,
   normalizeProject,
@@ -123,6 +123,15 @@ export function addText(p, { text = "Text", style, start = 0, duration = 3, trac
   return { project, clip: clipById(project, clip.id) };
 }
 
+// An animated title from a template (TITLE_TEMPLATES) at `start`.
+export function addTitle(p, templateId, { start = 0, text } = {}) {
+  const tpl = TITLE_TEMPLATES.find((t) => t.id === templateId);
+  if (!tpl) throw new Error(`Unknown title template: ${templateId}`);
+  const r = addText(p, { text: text ?? tpl.text, style: tpl.style, start, duration: tpl.duration, x: tpl.x, y: tpl.y });
+  const project = setClip(r.project, r.clip.id, { animIn: tpl.animIn, animOut: tpl.animOut });
+  return { project, clip: clipById(project, r.clip.id) };
+}
+
 // Many text clips on a fresh track (auto captions).
 export function addTextTrack(p, items, { name = "Captions", style } = {}) {
   let { project, track } = addTrack(p, "text", name);
@@ -202,7 +211,7 @@ export function trimClip(p, id, { in: inn, out } = {}) {
   const speed = c.speed || 1;
   let newIn = inn ?? c.in;
   let newOut = out ?? c.out;
-  if (isText(c)) {
+  if (!hasMedia(c)) {
     const delta = newIn - c.in; // dragging the left edge
     newOut = Math.max(0.1, newOut - delta);
     newIn = 0;
@@ -233,14 +242,14 @@ export function splitClip(p, id, time) {
   const project = edit(p, (n) => {
     const left = clipById(n, id);
     const right = structuredClone(left);
-    const cut = isText(left) ? rel : left.in + rel * (left.speed || 1);
+    const cut = !hasMedia(left) ? rel : left.in + rel * (left.speed || 1);
     right.id = rightId;
     right.start = time;
     right.fadeIn = 0;
     right.animIn = null;
     right.transition = null;
     right.keyframes = left.keyframes.filter((f) => f.t >= rel - EPS).map((f) => ({ ...f, t: f.t - rel }));
-    if (isText(left)) {
+    if (!hasMedia(left)) {
       right.out = left.out - rel;
       left.out = rel;
     } else {
@@ -302,10 +311,10 @@ export function removeRanges(p, ranges, { ripple = true } = {}) {
     .sort((x, y) => y[0] - x[0]);
   let project = p;
   for (const [a, b] of sorted) {
-    project = splitAt(splitAt(project, a), b);
     const len = b - a;
     project = edit(project, (n) => {
-      n.clips = n.clips.filter((c) => !(c.start >= a - EPS && clipEnd(c) <= b + EPS));
+      const frame = 1 / (n.canvas?.fps || 30);
+      n.clips = n.clips.flatMap((c) => partsOutside(c, a, b, frame));
       n.bleeps = n.bleeps.map((x) => cutSpan(x, a, b, ripple)).filter(Boolean);
       n.markers = n.markers.filter((m) => !(m.time >= a && m.time < b));
       if (!ripple) return;
@@ -314,6 +323,39 @@ export function removeRanges(p, ranges, { ripple = true } = {}) {
     });
   }
   return project;
+}
+
+// What's left of clip `c` once [a, b] is cut out: 0, 1 or 2 clips. A leftover
+// shorter than a frame is dropped (normalizing would grow it into its
+// neighbor).
+function partsOutside(c, a, b, frame) {
+  const end = clipEnd(c);
+  if (end <= a + EPS || c.start >= b - EPS) return [c];
+  const media = hasMedia(c);
+  const speed = media ? c.speed || 1 : 1;
+  const parts = [];
+  if (a - c.start >= frame - EPS) {
+    const left = structuredClone(c);
+    left.out = (media ? c.in : 0) + (a - c.start) * speed;
+    left.fadeOut = 0;
+    left.animOut = null;
+    left.keyframes = c.keyframes.filter((f) => f.t <= a - c.start + EPS);
+    parts.push(left);
+  }
+  if (end - b >= frame - EPS) {
+    const rel = b - c.start;
+    const right = structuredClone(c);
+    right.id = parts.length ? uid("c") : c.id;
+    right.start = b;
+    if (media) right.in = c.in + rel * speed;
+    else right.out = end - b;
+    right.fadeIn = 0;
+    right.animIn = null;
+    right.transition = null;
+    right.keyframes = c.keyframes.filter((f) => f.t >= rel - EPS).map((f) => ({ ...f, t: f.t - rel }));
+    parts.push(right);
+  }
+  return parts;
 }
 
 function cutSpan(x, a, b, ripple) {
@@ -326,8 +368,8 @@ function cutSpan(x, a, b, ripple) {
   return end - start > EPS ? { ...x, start, end } : null;
 }
 
-const MERGE_KEYS = ["transform", "crop", "adjust", "chroma", "stabilize", "audio", "style"];
-const SET_KEYS = ["volume", "fadeIn", "fadeOut", "muted", "opacity", "flipH", "flipV", "filter", "lut", "effects", "animIn", "animOut", "text", "speed", ...MERGE_KEYS];
+const MERGE_KEYS = ["transform", "crop", "adjust", "chroma", "stabilize", "audio", "style", "color"];
+const SET_KEYS = ["volume", "fadeIn", "fadeOut", "muted", "opacity", "flipH", "flipV", "filter", "lut", "effects", "animIn", "animOut", "text", "speed", "videoDenoise", ...MERGE_KEYS];
 
 // Set clip properties. Objects listed in MERGE_KEYS merge into the existing
 // value. Changing speed keeps the clip's start.
@@ -340,7 +382,7 @@ export function setClip(p, id, patch) {
       if (MERGE_KEYS.includes(key)) k[key] = { ...k[key], ...patch[key] };
       else k[key] = patch[key];
     }
-    if ("speed" in patch && !isText(c)) {
+    if ("speed" in patch && hasMedia(c)) {
       const speed = Math.min(10, Math.max(0.1, patch.speed));
       k.speed = speed;
       const ratio = (c.speed || 1) / speed;
@@ -563,6 +605,191 @@ export function mergeRanges(ranges) {
     else out.push([a, b]);
   }
   return out;
+}
+
+// Adjustment layer: a media-less clip on the top video track whose color and
+// effects apply to everything beneath it while it's on the timeline.
+export function addAdjustment(p, { start = 0, duration = 5 } = {}) {
+  let project = p;
+  let track = p.tracks.find((t) => t.kind === "video" && !overlaps(p, t.id, start, start + duration) && p.tracks.indexOf(t) === p.tracks.findIndex((x) => x.kind === "video"));
+  if (!track) ({ project, track } = addTrack(p, "video", "Adjustment"));
+  const clip = { id: uid("c"), trackId: track.id, adjustment: true, start, in: 0, out: duration };
+  project = edit(project, (n) => n.clips.push(clip));
+  return { project, clip: clipById(project, clip.id) };
+}
+
+// Roll edit: move the cut between two touching clips by `delta` timeline
+// seconds; the left clip gets longer as the right one gets shorter.
+export function rollEdit(p, leftId, rightId, delta) {
+  const a = requireClip(p, leftId);
+  const b = requireClip(p, rightId);
+  if (a.trackId !== b.trackId || Math.abs(clipEnd(a) - b.start) > TOUCH) throw new Error("Roll needs two touching clips on one track");
+  const ma = hasMedia(a) ? mediaById(p, a.mediaId) : null;
+  const maxA = ma && ma.kind !== "image" && ma.duration > 0 ? (ma.duration - a.out) / a.speed : Infinity;
+  const maxB = hasMedia(b) ? b.in / b.speed : Infinity;
+  let dd = Math.min(delta, clipLength(b) - 0.05); // b keeps at least 0.05 s
+  dd = Math.max(dd, -(clipLength(a) - 0.05)); // so does a
+  dd = Math.min(dd, maxA); // a can only grow into source it has
+  dd = Math.max(dd, -maxB); // b likewise, backwards
+  return edit(p, (n) => {
+    const A = clipById(n, leftId);
+    const B = clipById(n, rightId);
+    A.out += dd * (hasMedia(A) ? A.speed : 1);
+    if (hasMedia(B)) B.in += dd * B.speed;
+    else B.out -= dd;
+    B.start += dd;
+  });
+}
+
+// Slip: show a different part of the source without moving the clip.
+export function slipClip(p, id, delta) {
+  const c = requireClip(p, id);
+  if (!hasMedia(c)) return p;
+  const m = mediaById(p, c.mediaId);
+  const max = m.kind !== "image" && m.duration > 0 ? m.duration - c.out : Infinity;
+  const d = Math.max(-c.in, Math.min(max, delta));
+  return edit(p, (n) => {
+    const k = clipById(n, id);
+    k.in += d;
+    k.out += d;
+  });
+}
+
+// Split the clips that play `mediaId` at the given source times (e.g. detected
+// scene changes).
+export function splitAtSourceTimes(p, mediaId, times) {
+  let project = p;
+  for (const t of times) {
+    for (const c of project.clips) {
+      if (c.mediaId !== mediaId || t <= c.in + 0.05 || t >= c.out - 0.05) continue;
+      project = splitClip(project, c.id, c.start + (t - c.in) / c.speed).project;
+      break;
+    }
+  }
+  return project;
+}
+
+// Open a gap of `len` seconds at `at` on every track (clips spanning `at` are
+// split; everything after moves right) so an insert edit keeps sync.
+export function insertGap(p, at, len) {
+  const split = splitAt(p, at);
+  return edit(split, (n) => {
+    for (const c of n.clips) if (c.start >= at - EPS) c.start += len;
+    for (const b of n.bleeps) {
+      if (b.start >= at) {
+        b.start += len;
+        b.end += len;
+      }
+    }
+    for (const m of n.markers) {
+      if (m.time >= at) {
+        m.time += len;
+        if (m.end != null) m.end += len;
+      }
+    }
+  });
+}
+
+// Remove whatever sits in [a, b) on one track, leaving a gap.
+export function clearTrackRange(p, trackId, a, b) {
+  const split = splitAt(splitAt(p, a, { trackIds: [trackId] }), b, { trackIds: [trackId] });
+  return edit(split, (n) => {
+    n.clips = n.clips.filter((c) => !(c.trackId === trackId && c.start >= a - EPS && clipEnd(c) <= b + EPS));
+  });
+}
+
+// Three-point editing from the source monitor. mode: insert (ripple all
+// tracks), overwrite (replace what's there), append (end of the track) or
+// top (a free video track above, at `at`).
+export function placeSource(p, { mediaId, in: inn, out, at = 0, mode = "insert", trackId } = {}) {
+  const m = mediaById(p, mediaId);
+  if (!m) throw new Error(`No media ${mediaId}`);
+  const kind = m.hasVideo ? "video" : "audio";
+  const track = trackId ? trackById(p, trackId) : kind === "video" ? mainTrack(p) : p.tracks.find((t) => t.kind === "audio");
+  const len = out - inn;
+  if (!(len > EPS)) throw new Error("Set an In point before the Out point");
+  if (mode === "append") {
+    const end = track ? trackClips(p, track.id).reduce((e, c) => Math.max(e, clipEnd(c)), 0) : 0;
+    return addClip(p, { mediaId, trackId: track?.id, start: end, in: inn, out });
+  }
+  if (mode === "top") {
+    let project = p;
+    let top = p.tracks.find((t) => t.kind === kind && t !== track && !overlaps(p, t.id, at, at + len) && (kind !== "video" || t.id !== mainTrack(p).id));
+    if (!top) ({ project, track: top } = addTrack(p, kind));
+    return addClip(project, { mediaId, trackId: top.id, start: at, in: inn, out });
+  }
+  let project = p;
+  if (!track) ({ project } = addTrack(p, kind));
+  const target = track ?? project.tracks.find((t) => t.kind === kind);
+  project = mode === "overwrite" ? clearTrackRange(project, target.id, at, at + len) : insertGap(project, at, len);
+  const clip = { id: uid("c"), trackId: target.id, mediaId, start: at, in: inn, out };
+  project = edit(project, (n) => n.clips.push(clip));
+  return { project, clip: clipById(project, clip.id) };
+}
+
+// Close every gap on every track (each track keeps its own clip order).
+export function closeGaps(p) {
+  let project = p;
+  for (const t of p.tracks) project = compactTrack(project, t.id);
+  return project;
+}
+
+// Speed ramp presets: the clip becomes several pieces whose speeds follow a
+// curve (an easy stand-in for retime curves / time remapping).
+export const SPEED_RAMPS = {
+  "ramp-up": { label: "Ramp up (slow → fast)", speeds: [0.5, 0.75, 1, 1.5, 2, 3] },
+  "ramp-down": { label: "Ramp down (fast → slow)", speeds: [3, 2, 1.5, 1, 0.75, 0.5] },
+  montage: { label: "Montage (fast, slow middle)", speeds: [3, 2, 0.6, 0.6, 2, 3] },
+  hero: { label: "Hero moment (normal, slow-mo, normal)", speeds: [1, 1, 0.3, 0.3, 1, 1] },
+  bullet: { label: "Bullet time (fast, very slow, fast)", speeds: [2.5, 1, 0.25, 0.25, 1, 2.5] },
+};
+
+export function speedRamp(p, clipId, preset) {
+  const def = SPEED_RAMPS[preset];
+  if (!def) throw new Error(`Unknown speed ramp: ${preset}`);
+  const c = requireClip(p, clipId);
+  if (!hasMedia(c)) throw new Error("Speed ramps need a video or audio clip");
+  const parts = def.speeds.length;
+  const srcLen = (c.out - c.in) / parts;
+  const pieces = def.speeds.map((speed, i) => ({ in: c.in + i * srcLen, out: c.in + (i + 1) * srcLen, speed }));
+  return edit(p, (n) => {
+    const base = clipById(n, clipId);
+    n.clips = n.clips.filter((k) => k.id !== clipId);
+    let t = base.start;
+    const total = pieces.reduce((s, x) => s + (x.out - x.in) / x.speed, 0);
+    const delta = total - clipLength(base);
+    // Later clips on the track move by the change in length.
+    for (const k of n.clips) if (k.trackId === base.trackId && k.start >= clipEnd(base) - EPS) k.start += delta;
+    pieces.forEach((x, i) => {
+      n.clips.push({
+        ...structuredClone(base),
+        id: i === 0 ? base.id : uid("c"),
+        start: t,
+        in: x.in,
+        out: x.out,
+        speed: x.speed,
+        keyframes: [],
+        transition: i === 0 ? base.transition : null,
+        animIn: i === 0 ? base.animIn : null,
+        animOut: i === parts - 1 ? base.animOut : null,
+        fadeIn: i === 0 ? base.fadeIn : 0,
+        fadeOut: i === parts - 1 ? base.fadeOut : 0,
+      });
+      t += (x.out - x.in) / x.speed;
+    });
+  });
+}
+
+export function setTranscript(p, mediaId, transcript) {
+  return edit(p, (n) => {
+    n.transcripts[mediaId] = transcript;
+  });
+}
+
+export function setDeliver(p, jobs) {
+  return edit(p, (n) => {
+    n.deliver = jobs;
+  });
 }
 
 export { projectDuration };

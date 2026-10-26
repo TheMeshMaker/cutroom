@@ -1,11 +1,13 @@
 // Drives the MCP server through a real stdio client, the way an agent would.
 import assert from "node:assert/strict";
-import { existsSync, rmSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { after, before, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import * as ops from "../core/ops.js";
+import { loadProject } from "../node/store.js";
 import { ensureMedia, OUT } from "./fixtures.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -86,4 +88,81 @@ test("agent uses the pro features", { timeout: 180000 }, async () => {
   assert.equal(frame.content[0].type, "image");
   const ex = json(await call("export_video", { outPath: join(OUT, "mcp-pro.mp4"), codec: "hevc", range: [0, 2], resolution: 720 }));
   assert.ok(existsSync(ex.path), JSON.stringify(ex));
+});
+
+test("agent uses the Premiere / Resolve tools", { timeout: 180000 }, async () => {
+  const { tools } = await client.listTools();
+  const names = tools.map((t) => t.name);
+  for (const n of ["track_set", "settings_set", "adjustment_add", "roll_edit", "clip_slip", "speed_ramp", "title_add", "source_place", "gaps_close", "scenes_split", "transcript_create", "transcript_words", "words_remove", "backups_list", "backup_restore"]) assert.ok(names.includes(n), n);
+
+  let s = json(await call("project_status"));
+  const mainId = s.tracks.find((t) => t.kind === "video" && t.layer === 0).id;
+  const [mediaA, mediaB] = s.media;
+  const clips = () => s.project.tracks.flatMap((t) => t.clips);
+  const onMain = () => s.project.tracks.find((t) => t.id === mainId).clips;
+
+  // Mixer and project loudness.
+  s = json(await call("track_set", { trackId: mainId, volume: 0.8, pan: -0.25, role: "dialogue" }));
+  const track = s.project.tracks.find((t) => t.id === mainId);
+  assert.deepEqual([track.volume, track.pan, track.role], [0.8, -0.25, "dialogue"]);
+  s = json(await call("settings_set", { loudness: -14 }));
+  assert.equal(s.project.settings.loudness, -14);
+
+  // Color wheels merge: lift y, then lift x, keeps both.
+  const first = onMain()[0];
+  await call("clip_set", { clipId: first.id, color: { lift: { y: 0.2 } } });
+  s = json(await call("clip_set", { clipId: first.id, color: { lift: { x: 0.1 } }, videoDenoise: 30 }));
+  const graded = clips().find((c) => c.id === first.id);
+  assert.deepEqual(graded.color.lift, { x: 0.1, y: 0.2, l: 0 });
+  assert.equal(graded.videoDenoise, 30);
+
+  s = json(await call("adjustment_add", { start: 0, duration: 1 }));
+  assert.match(s.note, /Adjustment layer/);
+  assert.ok(clips().some((c) => c.adjustment));
+  s = json(await call("title_add", { templateId: "lower-third", start: 2, text: "Agent\nlower third" }));
+  assert.ok(clips().some((c) => c.text === "Agent\nlower third"));
+
+  // Insert from the source keeps sync: everything moves 1 s right.
+  const before = s.project.duration;
+  s = json(await call("source_place", { mediaId: mediaB.id, in: 0, out: 1, at: 0, mode: "insert" }));
+  assert.ok(Math.abs(s.project.duration - before - 1) < 0.01, `${before} -> ${s.project.duration}`);
+
+  const count = onMain().length;
+  s = json(await call("speed_ramp", { clipId: onMain()[0].id, preset: "ramp-up" }));
+  assert.equal(onMain().length, count + 5);
+  const [l, r] = onMain();
+  s = json(await call("roll_edit", { leftClipId: l.id, rightClipId: r.id, delta: 0.05 }));
+  assert.ok(Math.abs(onMain()[1].start - (r.start + 0.05)) < 0.002, "the cut moved");
+  const piece = onMain()[5];
+  s = json(await call("clip_slip", { clipId: piece.id, delta: 0.5 }));
+  assert.ok(Math.abs(onMain()[5].in - (piece.in + 0.5)) < 0.002, "the source slipped");
+  s = json(await call("gaps_close"));
+
+  // Text-based editing on a transcript placed inside the visible part of a.mp4.
+  const proj = loadProject(PROJECT);
+  const a = proj.clips.filter((c) => c.mediaId === mediaA.id).sort((m, n) => m.start - n.start)[0];
+  const w = a.in + 0.1;
+  const words = [{ s: w, e: w + 0.2, w: "okay" }, { s: w + 0.3, e: w + 0.5, w: "um" }, { s: w + 0.6, e: w + 0.8, w: "go" }];
+  writeFileSync(PROJECT, JSON.stringify(ops.setTranscript(proj, mediaA.id, { language: "en", words })));
+  let t = json(await call("transcript_words", { mediaId: mediaA.id }));
+  assert.equal(t.text, "okay um go");
+  t = json(await call("transcript_words", { mediaId: mediaA.id, fillersOnly: true }));
+  assert.deepEqual(t.words.map((x) => x[3]), ["um"]);
+  s = json(await call("words_remove", { mediaId: mediaA.id, fillers: true }));
+  assert.match(s.note, /Cut 1 word/);
+  t = json(await call("transcript_words", { mediaId: mediaA.id }));
+  assert.equal(t.text, "okay go");
+
+  // Subtitles out, and back in on a Captions track.
+  const saved = json(await call("captions_save", { outPath: join(OUT, "mcp-captions.srt") }));
+  assert.ok(existsSync(saved.path) && saved.lines >= 1, JSON.stringify(saved));
+  s = json(await call("captions_import", { path: saved.path, offset: 0.5 }));
+  assert.ok(s.project.tracks.some((t) => t.name === "Captions" && t.clips.length === saved.lines));
+
+  // Automatic backups, and going back to one.
+  const { backups } = json(await call("backups_list"));
+  assert.ok(backups.length >= 1);
+  const restored = json(await call("backup_restore", { file: backups[backups.length - 1].file }));
+  assert.equal(restored.name, "Agent edit");
+  assert.ok(json(await call("backups_list")).backups.some((b) => b.file.includes("before-restore")));
 });

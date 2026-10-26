@@ -50,6 +50,19 @@ export const TEXT_STYLES = [
   { id: "arabic", name: "عربي", style: { font: "Tahoma", size: 76, strokeWidth: 4 } },
 ];
 
+// Animated title templates (Essential Graphics-style, made of one styled text
+// clip each): text, look, position and in/out animation in one click.
+export const TITLE_TEMPLATES = [
+  { id: "lower-third", name: "Lower third", text: "Your Name\nWhat you do", duration: 4, x: -0.27, y: 0.33, style: { size: 50, bg: "#000000b3", bold: true }, animIn: { type: "slide-right", duration: 0.45 }, animOut: { type: "fade", duration: 0.4 } },
+  { id: "big-title", name: "Big title", text: "TITLE", duration: 3, x: 0, y: 0, style: { font: "Segoe UI Black", size: 150, bold: false, shadow: true }, animIn: { type: "zoom-in", duration: 0.5 }, animOut: { type: "fade", duration: 0.5 } },
+  { id: "chapter", name: "Chapter card", text: "Chapter 1", duration: 3, x: 0, y: -0.05, style: { font: "Georgia", size: 96, strokeWidth: 0, shadow: true }, animIn: { type: "fade", duration: 0.6 }, animOut: { type: "fade", duration: 0.6 } },
+  { id: "subscribe", name: "Subscribe", text: "SUBSCRIBE ▶", duration: 3, x: 0.28, y: 0.36, style: { size: 56, bg: "#e5484dff", bold: true }, animIn: { type: "pop", duration: 0.35 }, animOut: { type: "slide-right", duration: 0.35 } },
+  { id: "location", name: "Location tag", text: "📍 Somewhere", duration: 3, x: -0.33, y: -0.38, style: { size: 40, bg: "#00000099", bold: false }, animIn: { type: "slide-down", duration: 0.4 }, animOut: { type: "fade", duration: 0.3 } },
+  { id: "callout", name: "Callout", text: "WAIT FOR IT…", duration: 2.5, x: 0, y: 0.3, style: { color: "#ffd400", size: 80, strokeWidth: 6 }, animIn: { type: "pop", duration: 0.3 }, animOut: { type: "zoom-out", duration: 0.3 } },
+  { id: "end-card", name: "End card", text: "Thanks for watching!", duration: 5, x: 0, y: -0.25, style: { size: 84, shadow: true }, animIn: { type: "slide-up", duration: 0.5 }, animOut: { type: "fade", duration: 0.5 } },
+  { id: "arabic-title", name: "عنوان", text: "العنوان", duration: 3, x: 0, y: 0.3, style: { font: "Tahoma", size: 88, strokeWidth: 5 }, animIn: { type: "fade", duration: 0.4 }, animOut: { type: "fade", duration: 0.4 } },
+];
+
 // Color adjustment keys and ranges (all default 0).
 export const ADJUST_KEYS = {
   brightness: [-100, 100],

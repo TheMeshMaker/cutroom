@@ -1,15 +1,17 @@
 import { app, BrowserWindow, dialog, ipcMain, protocol, shell } from "electron";
+import { createHash } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { dirname, extname, join } from "node:path";
+import { basename, dirname, extname, join } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { importCapcutDraft } from "../core/capcut-import.js";
-import { createProject } from "../core/model.js";
+import { parseSubtitles, toSrt } from "../core/captions.js";
+import { createProject, projectDuration } from "../core/model.js";
 import { transcribe } from "../node/captions.js";
 import { availableEncoders, renderAudio, renderFrame, renderProject } from "../node/exporter.js";
-import { detectSilence, ensureProxy, extractFrame, filmstrip, makeReversed, probe, waveform } from "../node/media.js";
-import { loadProject, PROJECT_EXT, readState, saveProject, watchProject, writeState } from "../node/store.js";
+import { detectScenes, detectSilence, ensureProxy, extractFrame, filmstrip, makeReversed, probe, waveform } from "../node/media.js";
+import { listBackups, loadProject, PROJECT_EXT, readState, restoreBackup, saveProject, watchProject, writeState } from "../node/store.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(1);
@@ -34,15 +36,18 @@ function serveMedia(request) {
   if (!existsSync(path)) return new Response("Not found", { status: 404 });
   const size = statSync(path).size;
   const type = MIME[extname(path).toLowerCase()] ?? "application/octet-stream";
+  // CORS so the preview can route media through Web Audio (meters, faders)
+  // and read frames into canvases (scopes).
+  const cors = { "Access-Control-Allow-Origin": "*" };
   const range = /bytes=(\d*)-(\d*)/.exec(request.headers.get("range") ?? "");
   if (!range) {
-    return new Response(Readable.toWeb(createReadStream(path)), { status: 200, headers: { "Content-Type": type, "Content-Length": String(size), "Accept-Ranges": "bytes" } });
+    return new Response(Readable.toWeb(createReadStream(path)), { status: 200, headers: { ...cors, "Content-Type": type, "Content-Length": String(size), "Accept-Ranges": "bytes" } });
   }
   const start = range[1] ? Number(range[1]) : Math.max(0, size - Number(range[2]));
   const end = range[1] && range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
   return new Response(Readable.toWeb(createReadStream(path, { start, end })), {
     status: 206,
-    headers: { "Content-Type": type, "Content-Length": String(end - start + 1), "Content-Range": `bytes ${start}-${end}/${size}`, "Accept-Ranges": "bytes" },
+    headers: { ...cors, "Content-Type": type, "Content-Length": String(end - start + 1), "Content-Range": `bytes ${start}-${end}/${size}`, "Accept-Ranges": "bytes" },
   });
 }
 
@@ -62,9 +67,22 @@ function openProjectFile(path) {
     },
     () => current.lastText,
   );
-  writeState({ lastProject: path });
+  rememberProject(path);
   win?.setTitle(`${project.name} - Cutroom`);
   return { path, project };
+}
+
+// Recent projects for the Projects home (newest first).
+function rememberProject(path) {
+  const recent = (readState().recentProjects ?? []).filter((p) => p !== path);
+  writeState({ lastProject: path, recentProjects: [path, ...recent].slice(0, 40) });
+}
+
+function closeProject() {
+  current.unwatch?.();
+  current = { path: null, lastText: "", unwatch: null };
+  writeState({ lastProject: null });
+  win?.setTitle("Cutroom");
 }
 
 function saveTo(path, project) {
@@ -98,6 +116,7 @@ function job(kind, id, fn) {
 }
 
 handle("app:initial", () => {
+  if (argv.includes("--home")) return null;
   const explicit = flag("project");
   const last = readState().lastProject;
   const path = explicit ?? (last && existsSync(last) ? last : null);
@@ -122,6 +141,45 @@ handle("project:open", async (path) => {
 });
 
 handle("project:save", (path, project) => saveTo(path, project));
+handle("project:close", () => closeProject());
+handle("backups:list", (path) => listBackups(path));
+handle("backups:restore", (path, file) => {
+  restoreBackup(path, file);
+  return openProjectFile(path);
+});
+
+handle("projects:list", () => {
+  const st = readState();
+  const paths = [...new Set([...(st.recentProjects ?? []), ...(st.lastProject ? [st.lastProject] : [])])];
+  return paths.map((path) => {
+    if (!existsSync(path)) return { path, missing: true, name: basename(path).replace(PROJECT_EXT, "") };
+    try {
+      const p = loadProject(path);
+      const st = statSync(path);
+      return { path, name: p.name, modified: st.mtimeMs, duration: projectDuration(p), clips: p.clips.length, canvas: p.canvas };
+    } catch {
+      return { path, broken: true, name: basename(path) };
+    }
+  });
+});
+
+// A cached thumbnail of a project (frame a third of the way in).
+handle("projects:thumb", async (path) => {
+  const p = loadProject(path);
+  const dur = projectDuration(p);
+  if (!dur) return null;
+  const dir = join(tmpdir(), "cutroom", "thumbs");
+  mkdirSync(dir, { recursive: true });
+  const key = createHash("sha1").update(`${path}|${statSync(path).mtimeMs}`).digest("hex").slice(0, 16);
+  const out = join(dir, `${key}.jpg`);
+  if (!existsSync(out)) await renderFrame(p, Math.min(dur / 3, dur - 0.05), out, { previewWidth: 480 });
+  return out;
+});
+
+handle("projects:forget", (path) => {
+  writeState({ recentProjects: (readState().recentProjects ?? []).filter((p) => p !== path) });
+  return true;
+});
 
 handle("capcut:import", async () => {
   const r = await dialog.showOpenDialog(win, {
@@ -160,6 +218,43 @@ handle("media:filmstrip", (media, source) => filmstrip(media, { source }));
 handle("media:silence", (media, opts) => detectSilence(media, opts));
 handle("media:reverse", (media, inn, out, id) => job("reverse", id, (onProgress) => makeReversed(media, inn, out, { onProgress })));
 handle("media:freeze", (media, time) => extractFrame(media, time));
+handle("media:scenes", (media, opts) => detectScenes(media, opts));
+
+handle("dialog:folder", async (title) => {
+  const r = await dialog.showOpenDialog(win, { title: title ?? "Choose a folder", defaultPath: current.path ? dirname(current.path) : app.getPath("videos"), properties: ["openDirectory", "createDirectory"] });
+  return r.canceled ? null : r.filePaths[0];
+});
+
+handle("frame:save", async (project, time) => {
+  const r = await dialog.showSaveDialog(win, {
+    title: "Save still frame",
+    defaultPath: join(current.path ? dirname(current.path) : app.getPath("pictures"), `${project.name} still.png`),
+    filters: [{ name: "PNG image", extensions: ["png"] }, { name: "JPEG image", extensions: ["jpg"] }],
+  });
+  if (r.canceled || !r.filePath) return null;
+  return renderFrame(project, time, r.filePath);
+});
+// Save the captions track as .srt (asks where unless `path` is given).
+handle("captions:save", async (project, path) => {
+  const text = toSrt(project);
+  let file = path;
+  if (!file) {
+    const r = await dialog.showSaveDialog(win, {
+      title: "Save captions",
+      defaultPath: join(current.path ? dirname(current.path) : app.getPath("videos"), `${project.name}.srt`),
+      filters: [{ name: "SubRip subtitles", extensions: ["srt"] }],
+    });
+    if (r.canceled || !r.filePath) return null;
+    file = r.filePath;
+  }
+  writeFileSync(file, text, "utf8");
+  return file;
+});
+handle("captions:open", async () => {
+  const r = await dialog.showOpenDialog(win, { title: "Import subtitles", filters: [{ name: "Subtitles", extensions: ["srt", "vtt"] }], properties: ["openFile"] });
+  if (r.canceled || !r.filePaths[0]) return null;
+  return { name: basename(r.filePaths[0]), lines: parseSubtitles(readFileSync(r.filePaths[0], "utf8")) };
+});
 handle("captions:transcribe", (media, opts, id) => job("captions", id, (onProgress) => transcribe(media, { ...opts, onProgress })));
 handle("encoders:list", () => availableEncoders());
 
@@ -215,7 +310,7 @@ function createWindow() {
     backgroundColor: "#0e0e10",
     title: "Cutroom",
     show: !SMOKE,
-    webPreferences: { preload: join(here, "preload.cjs"), contextIsolation: true, sandbox: true },
+    webPreferences: { preload: join(here, "preload.cjs"), contextIsolation: true, sandbox: true, backgroundThrottling: !SMOKE },
   });
   win.setMenuBarVisibility(false);
   const devUrl = process.env.CUTROOM_DEV_URL;
@@ -234,6 +329,10 @@ function createWindow() {
           }
           await new Promise((r) => setTimeout(r, Number(flag("settle") ?? 1500)));
         }
+        // A hidden window may hand back its last painted frame: repaint first.
+        win.webContents.invalidate();
+        await win.webContents.executeJavaScript("new Promise((r) => { requestAnimationFrame(() => requestAnimationFrame(r)); setTimeout(r, 500); })");
+        await new Promise((r) => setTimeout(r, 200));
         const image = await win.webContents.capturePage();
         const out = flag("screenshot") ?? join(app.getPath("temp"), "cutroom-smoke.png");
         writeFileSync(out, image.toPNG());

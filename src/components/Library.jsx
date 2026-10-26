@@ -1,11 +1,13 @@
 import { useMemo, useState } from "react";
-import { ADJUST_KEYS, EFFECTS, FILTERS, TEXT_STYLES, TRANSITIONS, DEFAULT_TEXT_STYLE } from "../../core/catalog.js";
+import { ADJUST_KEYS, EFFECTS, FILTERS, TEXT_STYLES, TITLE_TEMPLATES, TRANSITIONS, DEFAULT_TEXT_STYLE, byId } from "../../core/catalog.js";
+import { captionsTrack } from "../../core/captions.js";
+import TranscriptTab from "./Transcript.jsx";
 import { detectBeats } from "../../core/analysis.js";
 import { clipById, clipEnd, formatTime, isText, mediaById } from "../../core/model.js";
 import * as ops from "../../core/ops.js";
 import { useEditor } from "../editor.js";
 import { cssFilter } from "../look.js";
-import { mediaUrl } from "../state.js";
+import { api, mediaUrl } from "../state.js";
 import Icon from "./icons.jsx";
 
 const TABS = [
@@ -16,6 +18,7 @@ const TABS = [
   ["transitions", "Transitions", "transition"],
   ["filters", "Filters", "filter"],
   ["captions", "Captions", "captions"],
+  ["transcript", "Script", "transcript"],
 ];
 
 export const dragItem = (e, item) => {
@@ -23,12 +26,13 @@ export const dragItem = (e, item) => {
   e.dataTransfer.effectAllowed = "copy";
 };
 
-export function Thumb({ media, strips, className = "", style }) {
+export function Thumb({ media, strips, className = "", style, at }) {
   const strip = strips[media?.id];
   if (!media) return <div className={`thumb ${className}`} style={style} />;
   if (media.kind === "image") return <div className={`thumb ${className}`} style={{ backgroundImage: `url("${mediaUrl(media.path)}")`, backgroundSize: "cover", backgroundPosition: "center", ...style }} />;
   if (!strip) return <div className={`thumb placeholder ${className}`} style={style}><Icon name={media.hasVideo ? "film" : "music"} size={22} /></div>;
-  const i = Math.floor(strip.count / 3);
+  // `at` picks the tile for a source time; otherwise a frame a third in.
+  const i = at != null ? Math.min(strip.count - 1, Math.max(0, Math.floor(at / strip.interval))) : Math.floor(strip.count / 3);
   const col = i % strip.cols;
   const row = Math.floor(i / strip.cols);
   return (
@@ -64,6 +68,7 @@ export default function Library() {
         {libraryTab === "transitions" && <TransitionsTab />}
         {libraryTab === "filters" && <FiltersTab />}
         {libraryTab === "captions" && <CaptionsTab />}
+        {libraryTab === "transcript" && <TranscriptTab />}
       </div>
     </aside>
   );
@@ -104,8 +109,8 @@ function MediaTab() {
                 e.dataTransfer.setData("application/x-cutroom-media", m.id);
                 e.dataTransfer.effectAllowed = "copy";
               }}
-              onDoubleClick={() => actions.addMedia(m.id)}
-              title={`${m.path}\nDrag to the timeline or click +`}
+              onDoubleClick={() => actions.openSource(m.id)}
+              title={`${m.path}\nDouble-click: open in the source monitor · drag or + to add`}
             >
               <Thumb media={m} strips={strips} />
               {m.kind !== "image" && <span className="dur">{formatTime(m.duration).replace(/:\d\d$/, "")}</span>}
@@ -149,7 +154,7 @@ function AudioTab() {
         {!audio.length && <p className="muted small">Import music, voice-overs or sound effects (WAV, MP3, M4A, FLAC…).</p>}
         <div className="list">
           {audio.map((m) => (
-            <div key={m.id} className="list-item" draggable onDragStart={(e) => e.dataTransfer.setData("application/x-cutroom-media", m.id)} onDoubleClick={() => actions.addMedia(m.id)}>
+            <div key={m.id} className="list-item" draggable onDragStart={(e) => e.dataTransfer.setData("application/x-cutroom-media", m.id)} onDoubleClick={() => actions.openSource(m.id)}>
               <span className="li-icon audio"><Icon name="music" /></span>
               <span className="li-name">{m.name}</span>
               <span className="li-meta">{formatTime(m.duration).replace(/:\d\d$/, "")}</span>
@@ -183,6 +188,18 @@ function TextTab() {
         <button className="text-add" onClick={() => actions.addText("classic")} draggable onDragStart={(e) => dragItem(e, { kind: "text", id: "classic" })}>
           <Icon name="plus" /> Add text
         </button>
+      </Section>
+      <Section title="Animated titles">
+        <div className="grid template-grid">
+          {TITLE_TEMPLATES.map((tpl) => (
+            <button key={tpl.id} className="template-card" onClick={() => actions.addTitle(tpl.id)} title={`${tpl.name}: adds at the playhead`}>
+              <span className={`tpl-preview tpl-${tpl.id}`} style={{ fontFamily: `"${tpl.style.font ?? "Segoe UI"}"`, color: tpl.style.color ?? "#fff", background: tpl.style.bg ? `#${tpl.style.bg.slice(1)}` : undefined }}>
+                {tpl.text.split(/\n/)[0].slice(0, 14)}
+              </span>
+              <small>{tpl.name}</small>
+            </button>
+          ))}
+        </div>
       </Section>
       <Section title="Styles">
         <div className="grid style-grid">
@@ -223,6 +240,12 @@ function EffectsTab() {
   const sample = sampleMedia(project);
   const zero = Object.fromEntries(Object.keys(ADJUST_KEYS).map((k) => [k, 0]));
   return (
+    <>
+    <Section title="Adjustment layer">
+      <button className="text-add" onClick={actions.addAdjustment} title="Grades and effects on this layer apply to everything below it">
+        <Icon name="adjust" /> Add adjustment layer
+      </button>
+    </Section>
     <Section title="Video effects">
       <div className="grid fx-grid">
         {EFFECTS.map((fx) => (
@@ -233,6 +256,7 @@ function EffectsTab() {
         ))}
       </div>
     </Section>
+    </>
   );
 }
 
@@ -274,7 +298,7 @@ function FiltersTab() {
 const LANGS = [["auto", "Auto-detect"], ["en", "English"], ["ar", "Arabic"], ["es", "Spanish"], ["fr", "French"], ["de", "German"], ["tr", "Turkish"], ["ur", "Urdu"], ["hi", "Hindi"], ["id", "Indonesian"], ["ru", "Russian"], ["ja", "Japanese"], ["ko", "Korean"], ["zh", "Chinese"], ["pt", "Portuguese"]];
 
 function CaptionsTab() {
-  const { project, jobs, actions, apply } = useEditor();
+  const { project, jobs, actions, apply, notify } = useEditor();
   const audible = useMemo(() => {
     const used = new Set(project.clips.map((c) => c.mediaId));
     return project.media.filter((m) => used.has(m.id) && m.hasAudio);
@@ -285,6 +309,18 @@ function CaptionsTab() {
   const sourceId = source ?? (audible.find((m) => !m.hasVideo) ?? audible[0])?.id;
   const running = Object.entries(jobs).find(([k]) => k.startsWith("captions:"));
   const captionTracks = project.tracks.filter((t) => t.kind === "text" && t.name.startsWith("Captions"));
+  const importSubtitles = async () => {
+    try {
+      const r = await api.openSubtitles();
+      if (!r) return;
+      if (!r.lines.length) return notify(`No subtitles found in ${r.name}`, "error");
+      apply((p) => ops.addTextTrack(p, r.lines, { name: "Captions", style: byId(TEXT_STYLES, style)?.style }).project);
+      notify(`Imported ${r.lines.length} captions from ${r.name}`);
+    } catch (e) {
+      notify(e.message, "error");
+    }
+  };
+  const saveSrt = () => api.saveCaptions(project).then((f) => f && notify(`Saved ${f}`)).catch((e) => notify(e.message, "error"));
   return (
     <Section title="Auto captions">
       <p className="muted small">Speech to text with Whisper large-v3, on your own GPU. Nothing is uploaded.</p>
@@ -308,6 +344,14 @@ function CaptionsTab() {
           <Icon name="captions" /> Generate captions
         </button>
       )}
+      <div className="row-2 subtitle-files">
+        <button className="small" onClick={importSubtitles} title="Bring in subtitles made elsewhere (.srt or .vtt)">
+          <Icon name="file" size={13} /> Import .srt
+        </button>
+        <button className="small" onClick={saveSrt} disabled={!captionsTrack(project)} title="Upload this file to YouTube as subtitles">
+          <Icon name="export" size={13} /> Save .srt
+        </button>
+      </div>
       {captionTracks.length > 0 && (
         <button className="small ghost wide" onClick={() => captionTracks.forEach((t) => apply((p) => ops.removeTrack(p, t.id)))}>Remove caption tracks</button>
       )}

@@ -210,6 +210,23 @@ export async function extractFrame(media, time) {
   return { ...(await probe(file)), name: `Freeze ${media.name}` };
 }
 
+// Source times where the picture changes shot (scene cuts). Runs on a small
+// downscaled copy for speed; `source` may be a proxy of the same media.
+export async function detectScenes(media, { threshold = 0.35, minGap = 1, source } = {}) {
+  if (!media.hasVideo || media.kind === "image") return [];
+  const { code, stderr } = await run(FFMPEG, [
+    "-hide_banner", "-nostats", "-i", source ?? media.path, "-an",
+    "-vf", `scale=320:-2,select='gt(scene,${f6(threshold)})',showinfo`, "-f", "null", "-",
+  ]);
+  if (code !== 0) throw new Error(`Scene detection failed: ${stderr.trim().split("\n").pop()}`);
+  const times = [];
+  for (const m of stderr.matchAll(/pts_time:([\d.]+)/g)) {
+    const t = Number(m[1]);
+    if (!times.length || t - times[times.length - 1] >= minGap) times.push(t);
+  }
+  return times;
+}
+
 // Ranges (source seconds) quieter than `noise` dB for at least `minDuration`.
 export async function detectSilence(media, { noise = -35, minDuration = 2 } = {}) {
   if (!media.hasAudio) return [];

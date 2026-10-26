@@ -12,9 +12,16 @@ export default function Properties() {
   const clip = selection.clips.length === 1 ? clipById(project, selection.clips[0]) : null;
   let kind = "draft";
   let tabs = [["draft", "Draft"]];
+  const marker = selection.markers.length === 1 ? project.markers.find((m) => m.id === selection.markers[0]) : null;
   if (selection.transition && clipById(project, selection.transition)) {
     kind = "transition";
     tabs = [["transition", "Transition"]];
+  } else if (marker) {
+    kind = "marker";
+    tabs = [["marker", "Marker"]];
+  } else if (clip?.adjustment) {
+    kind = "adjustment";
+    tabs = [["adjust", "Adjust"], ["layerfx", "Effects"]];
   } else if (clip && isText(clip)) {
     kind = "text";
     tabs = [["text", "Text"], ["animation", "Animation"]];
@@ -43,6 +50,8 @@ export default function Properties() {
         {active === "draft" && <DraftPanel />}
         {active === "transition" && <TransitionPanel clip={clipById(project, selection.transition)} />}
         {active === "bleep" && <BleepPanel />}
+        {active === "marker" && marker && <MarkerPanel marker={marker} />}
+        {clip && active === "layerfx" && <LayerEffectsPanel clip={clip} />}
         {clip && active === "video" && <VideoPanel clip={clip} />}
         {clip && active === "audio" && <AudioPanel clip={clip} />}
         {clip && active === "speed" && <SpeedPanel clip={clip} />}
@@ -199,9 +208,11 @@ function VideoPanel({ clip }) {
           </>
         )}
       </Group>
-      <Group title="Stabilize">
+      <Group title="Clean up">
         <Toggle label="Reduce camera shake" checked={clip.stabilize.enabled} onChange={(v) => set({ stabilize: { enabled: v } })} />
         {clip.stabilize.enabled && <Slider label="Level" value={clip.stabilize.strength} min={0} max={100} onChange={(v) => set({ stabilize: { strength: v } }, "stab")} />}
+        <Toggle label="Reduce video noise (grain, low light)" checked={clip.videoDenoise > 0} onChange={(v) => set({ videoDenoise: v ? 40 : 0 })} />
+        {clip.videoDenoise > 0 && <Slider label="Strength" value={clip.videoDenoise} min={1} max={100} onChange={(v) => set({ videoDenoise: v }, "vdn")} />}
       </Group>
       <Group title="Effects">
         {!fxList.length && <div className="muted small">Add from the Effects tab.</div>}
@@ -298,10 +309,21 @@ function SpeedPanel({ clip }) {
         </div>
         <div className="muted small">Pitch is kept when you change speed.</div>
       </Group>
+      <Group title="Speed ramp">
+        <p className="muted small">Splits the clip into pieces whose speed follows a curve.</p>
+        <div className="choice-grid two">
+          {Object.entries(ops.SPEED_RAMPS).map(([k, r]) => (
+            <button key={k} className="choice" onClick={() => actions.speedRamp(k)} title={r.label}>
+              {r.label.split(" (")[0]}
+            </button>
+          ))}
+        </div>
+      </Group>
       <Group title="Tools">
         <div className="button-row wrap">
           <button className="small" onClick={actions.reverse}><Icon name="reverse" size={14} /> Reverse</button>
           <button className="small" onClick={actions.freeze}><Icon name="freeze" size={14} /> Freeze frame</button>
+          <button className="small" onClick={actions.scenes}><Icon name="scenes" size={14} /> Split at scenes</button>
         </div>
       </Group>
     </>
@@ -402,6 +424,79 @@ function TextPanel({ clip }) {
         <Slider label="Scale" value={pct(clip.transform.scale * 100)} min={20} max={400} onChange={(v) => setTr("scale", v / 100)} unit="%" />
         <Slider label="Opacity" value={pct(clip.opacity * 100)} min={0} max={100} onChange={(v) => apply((p) => ops.setClip(p, clip.id, { opacity: v / 100 }), { coalesce: `top-${clip.id}` })} unit="%" />
       </Group>
+    </>
+  );
+}
+
+const MARKER_COLORS = ["amber", "red", "green", "blue", "purple"];
+
+function MarkerPanel({ marker }) {
+  const { apply, setSelection, project } = useEditor();
+  const set = (patch, key) =>
+    apply((p) => ({ ...p, revision: p.revision + 1, markers: p.markers.map((m) => (m.id === marker.id ? { ...m, ...patch } : m)) }), key ? { coalesce: key } : undefined);
+  return (
+    <Group title={marker.end != null ? "Range marker" : "Marker"}>
+      <label className="field">
+        <span className="field-label">Name (used for YouTube chapters)</span>
+        <input value={marker.label} onChange={(e) => set({ label: e.target.value }, `mk-${marker.id}`)} placeholder="e.g. The jumpscare" />
+      </label>
+      <div className="swatches">
+        {MARKER_COLORS.map((c) => (
+          <button key={c} className={`swatch ${c} ${marker.color === c ? "active" : ""}`} onClick={() => set({ color: c })} title={c} />
+        ))}
+      </div>
+      <div className="facts">
+        <div>
+          <span>At</span>
+          {formatTime(marker.time, project.canvas.fps)}
+        </div>
+        {marker.end != null && (
+          <div>
+            <span>Length</span>
+            {(marker.end - marker.time).toFixed(2)} s
+          </div>
+        )}
+      </div>
+      <div className="button-row">
+        <button className="small" onClick={() => playhead.set(marker.time)}>Go to marker</button>
+        <button className="small danger" onClick={() => (apply((p) => ops.removeMarkers(p, [marker.id])), setSelection(EMPTY_SELECTION))}>
+          <Icon name="trash" size={12} /> Delete
+        </button>
+      </div>
+    </Group>
+  );
+}
+
+// Effects and look on an adjustment layer (applied to everything below it).
+function LayerEffectsPanel({ clip }) {
+  const { apply } = useEditor();
+  const set = (patch, key) => apply((p) => ops.setClip(p, clip.id, patch), key ? { coalesce: `${key}-${clip.id}` } : undefined);
+  const allowed = ["blur", "grain", "rgb-split", "bw", "invert", "sketch"];
+  return (
+    <>
+      <Group title="Look">
+        <select value={clip.filter?.id ?? ""} onChange={(e) => set({ filter: e.target.value ? { id: e.target.value, intensity: clip.filter?.intensity ?? 100 } : null })}>
+          <option value="">None</option>
+          {FILTERS.map((f) => <option key={f.id} value={f.id}>{f.name}</option>)}
+        </select>
+        {clip.filter && <Slider label="Amount" value={clip.filter.intensity} min={0} max={100} onChange={(v) => set({ filter: { ...clip.filter, intensity: v } }, "lk")} />}
+      </Group>
+      <Group title="Effects on everything below">
+        <div className="choice-grid">
+          {EFFECTS.filter((e) => allowed.includes(e.id)).map((e) => {
+            const on = clip.effects.some((x) => x.id === e.id);
+            return (
+              <button key={e.id} className={`choice ${on ? "active" : ""}`} onClick={() => set({ effects: on ? clip.effects.filter((x) => x.id !== e.id) : [...clip.effects, { id: e.id, intensity: 60 }] })}>
+                {e.name}
+              </button>
+            );
+          })}
+        </div>
+        {clip.effects.map((fx) => (
+          <Slider key={fx.id} label={byId(EFFECTS, fx.id)?.name.split(" ")[0]} value={fx.intensity} min={0} max={100} onChange={(v) => set({ effects: clip.effects.map((x) => (x.id === fx.id ? { ...x, intensity: v } : x)) }, `fx-${fx.id}`)} />
+        ))}
+      </Group>
+      <p className="muted small">Color wheels and curves for this layer are on the Color page.</p>
     </>
   );
 }

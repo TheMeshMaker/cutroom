@@ -3,7 +3,7 @@
 // the same operations the app uses; an open Cutroom window reloads the change
 // live, and the user can undo it there.
 
-import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -11,18 +11,19 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { importCapcutDraft } from "../core/capcut-import.js";
 import { detectBeats } from "../core/analysis.js";
-import { captionLines } from "../core/captions.js";
-import { ADJUST_KEYS, ANIMATIONS, EFFECTS, FILTERS, FONTS, TEXT_STYLES, TRANSITIONS, VOICE_EFFECTS, byId } from "../core/catalog.js";
-import { clipById, clipEnd, createProject, CANVAS_PRESETS, formatTime, isText, mediaById, projectDuration, sourceAt, trackById, videoLayers } from "../core/model.js";
+import { captionLines, captionsTrack, parseSubtitles, toSrt } from "../core/captions.js";
+import { ADJUST_KEYS, ANIMATIONS, EFFECTS, FILTERS, FONTS, TEXT_STYLES, TITLE_TEMPLATES, TRANSITIONS, VOICE_EFFECTS, byId } from "../core/catalog.js";
+import { clipById, clipEnd, createProject, CANVAS_PRESETS, DEFAULT_CURVE, formatTime, hasMedia, isAdjustment, isText, mediaById, projectDuration, ROLES, sourceAt, trackById, videoLayers } from "../core/model.js";
 import * as ops from "../core/ops.js";
 import { EXPORT_PRESETS } from "../core/render.js";
+import { timelineWords, wordRanges, wordsFromSegments } from "../core/transcript.js";
 import { transcribe } from "../node/captions.js";
 import { renderFrame, renderProject } from "../node/exporter.js";
-import { detectSilence, extractFrame, FFMPEG, makeReversed, probe, run, waveform } from "../node/media.js";
-import { loadProject, PROJECT_EXT, readState, saveProject, writeState } from "../node/store.js";
+import { detectScenes, detectSilence, extractFrame, FFMPEG, makeReversed, probe, run, waveform } from "../node/media.js";
+import { listBackups, loadProject, PROJECT_EXT, readState, restoreBackup, saveProject, writeState } from "../node/store.js";
 
 const CAPCUT_DRAFTS = join(process.env.LOCALAPPDATA ?? homedir(), "CapCut", "User Data", "Projects", "com.lveditor.draft");
-const server = new McpServer({ name: "cutroom", version: "0.2.0" });
+const server = new McpServer({ name: "cutroom", version: "0.3.0" });
 
 let currentPath = process.env.CUTROOM_PROJECT ?? null;
 
@@ -46,6 +47,7 @@ function summarize(path, p) {
     name: p.name,
     revision: p.revision,
     canvas: p.canvas,
+    settings: p.settings,
     duration: round(projectDuration(p)),
     durationText: formatTime(projectDuration(p), fps),
     media: p.media.map((m) => ({ id: m.id, name: m.name, kind: m.kind, duration: round(m.duration), width: m.width, height: m.height, hasAudio: m.hasAudio, path: m.path })),
@@ -56,6 +58,11 @@ function summarize(path, p) {
       ...(t.kind === "video" ? { layer: layers.indexOf(t.id) } : {}),
       muted: t.muted,
       hidden: t.hidden,
+      ...(t.volume !== 1 ? { volume: t.volume } : {}),
+      ...(t.pan ? { pan: t.pan } : {}),
+      ...(t.solo ? { solo: true } : {}),
+      ...(t.role ? { role: t.role } : {}),
+      ...(t.duck?.enabled ? { duck: t.duck } : {}),
       clips: p.clips
         .filter((c) => c.trackId === t.id)
         .sort((a, b) => a.start - b.start)
@@ -63,6 +70,7 @@ function summarize(path, p) {
     })),
     bleeps: p.bleeps.map((b) => ({ id: b.id, start: round(b.start), end: round(b.end) })),
     markers: p.markers.map((m) => ({ id: m.id, time: round(m.time), ...(m.end != null ? { end: round(m.end) } : {}), label: m.label })),
+    transcripts: Object.fromEntries(Object.entries(p.transcripts).map(([id, t]) => [id, { language: t.language, words: t.words.length }])),
   };
 }
 
@@ -74,7 +82,7 @@ function clipSummary(p, c) {
   const audioFx = nonZero({ ...c.audio });
   return {
     id: c.id,
-    ...(isText(c) ? { text: c.text, style: c.style } : { media: mediaById(p, c.mediaId)?.name, mediaId: c.mediaId, in: round(c.in), out: round(c.out) }),
+    ...(isText(c) ? { text: c.text, style: c.style } : isAdjustment(c) ? { adjustment: true } : { media: mediaById(p, c.mediaId)?.name, mediaId: c.mediaId, in: round(c.in), out: round(c.out) }),
     start: round(c.start),
     end: round(clipEnd(c)),
     ...(c.speed !== 1 ? { speed: c.speed } : {}),
@@ -88,6 +96,8 @@ function clipSummary(p, c) {
     ...(Object.keys(adjust).length ? { adjust } : {}),
     ...(c.filter ? { filter: c.filter } : {}),
     ...(c.lut ? { lut: c.lut } : {}),
+    ...(colorChanged(c.color) ? { color: c.color } : {}),
+    ...(c.videoDenoise ? { videoDenoise: c.videoDenoise } : {}),
     ...(c.effects.length ? { effects: c.effects } : {}),
     ...(c.chroma.enabled ? { chroma: c.chroma } : {}),
     ...(c.stabilize.enabled ? { stabilize: c.stabilize } : {}),
@@ -98,6 +108,9 @@ function clipSummary(p, c) {
     ...(c.keyframes.length ? { keyframes: c.keyframes.map((k) => ({ time: round(c.start + k.t), scale: k.scale, x: k.x, y: k.y, ease: k.ease })) } : {}),
   };
 }
+
+const colorChanged = (col) =>
+  !!col && (["lift", "gamma", "gain", "offset"].some((k) => col[k].x || col[k].y || col[k].l) || JSON.stringify(col.curve) !== JSON.stringify(DEFAULT_CURVE));
 
 const round = (x) => Math.round(x * 1000) / 1000;
 const text = (value) => ({ content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value, null, 2) }] });
@@ -165,6 +178,33 @@ tool("project_open", "Make an existing project file current.", { path: z.string(
   return text(summarize(resolve(path), p));
 });
 
+tool(
+  "settings_set",
+  "Project settings: magnet (close gaps on the main track after every edit, like CapCut) and loudness (LUFS target applied to every export, e.g. -14 for YouTube; null = off).",
+  { ...projectArg, magnet: z.boolean().optional(), loudness: z.number().min(-30).max(-8).nullable().optional() },
+  editTool((p, { project, ...patch }) => ops.setSettings(p, patch)),
+);
+
+tool(
+  "backups_list",
+  "List the automatic backups of a project (one every 5 minutes of editing, the last 30), newest first. Use backup_restore to go back to one.",
+  projectArg,
+  async ({ project }) => {
+    const path = projectPath(project);
+    return text({ backups: listBackups(path).map((b) => ({ file: b.file, time: new Date(b.time).toISOString(), clips: b.clips, duration: b.duration != null ? round(b.duration) : undefined })) });
+  },
+);
+
+tool(
+  "backup_restore",
+  "Replace the project with one of its backups (from backups_list). The current version is backed up first, so this can be undone the same way.",
+  { ...projectArg, file: z.string() },
+  async ({ project, file }) => {
+    const path = projectPath(project);
+    return text(summarize(path, restoreBackup(path, resolve(file))));
+  },
+);
+
 // ---- media and clips
 tool(
   "media_import",
@@ -217,6 +257,8 @@ tool(
 );
 
 const ids = (list) => list.map((x) => x.id);
+const unit = z.number().min(-1).max(1).optional();
+const wheelShape = z.object({ x: unit, y: unit, l: unit }).optional();
 const adjustShape = Object.fromEntries(Object.entries(ADJUST_KEYS).map(([k, [lo, hi]]) => [k, z.number().min(lo).max(hi).optional()]));
 
 tool(
@@ -241,6 +283,11 @@ tool(
     adjust: z.object(adjustShape).optional(),
     filter: z.object({ id: z.enum(ids(FILTERS)), intensity: z.number().min(0).max(100).optional() }).nullable().optional(),
     lut: z.string().nullable().optional().describe("Path to a .cube LUT, or null."),
+    color: z
+      .object({ lift: wheelShape, gamma: wheelShape, gain: wheelShape, offset: wheelShape, curve: z.array(z.tuple([z.number().min(0).max(1), z.number().min(0).max(1)])).min(2).optional() })
+      .optional()
+      .describe("Primary color wheels (Resolve style): lift = shadows, gamma = midtones, gain = highlights, offset = everything. x/y push the color (x + toward blue, - toward yellow; y + toward red, - toward cyan/green), l brightens or darkens; each -1..1. curve is the master luma curve as [input, output] points 0..1."),
+    videoDenoise: z.number().min(0).max(100).optional().describe("Video noise reduction strength (0 = off)."),
     effects: z.array(z.object({ id: z.enum(ids(EFFECTS)), intensity: z.number().min(0).max(100).optional() })).optional().describe("Replaces the clip's effect list."),
     chroma: z.object({ enabled: z.boolean().optional(), color: z.string().optional(), similarity: z.number().optional(), blend: z.number().optional() }).optional(),
     stabilize: z.object({ enabled: z.boolean().optional(), strength: z.number().min(0).max(100).optional() }).optional(),
@@ -250,9 +297,14 @@ tool(
     text: z.string().optional(),
     style: z.object({ font: z.enum(FONTS.map((f) => f.family)).optional(), size: z.number().optional(), color: z.string().optional(), bold: z.boolean().optional(), strokeColor: z.string().optional(), strokeWidth: z.number().optional(), bg: z.string().nullable().optional(), shadow: z.boolean().optional() }).optional(),
   },
-  editTool((p, { clipId, scale, x, y, rotation, effects, animIn, animOut, filter, ...rest }) => {
+  editTool((p, { clipId, scale, x, y, rotation, effects, animIn, animOut, filter, color, ...rest }) => {
     const transform = Object.fromEntries(Object.entries({ scale, x, y, rotation }).filter(([, v]) => v != null));
     const patch = { ...rest };
+    if (color) {
+      // A wheel given as {y: 0.2} keeps that wheel's other values.
+      const current = clipById(p, clipId)?.color ?? {};
+      patch.color = Object.fromEntries(Object.entries(color).map(([k, v]) => [k, k === "curve" ? v : { ...current[k], ...v }]));
+    }
     if (Object.keys(transform).length) patch.transform = transform;
     if (effects) patch.effects = effects.map((e) => ({ intensity: 60, ...e }));
     if (filter !== undefined) patch.filter = filter && { intensity: 100, ...filter };
@@ -343,6 +395,33 @@ tool(
 );
 
 tool(
+  "captions_save",
+  "Save the captions track (or any text track) as a SubRip .srt file, e.g. to upload to YouTube next to the video.",
+  { ...projectArg, outPath: z.string().describe("Where to write the .srt."), trackId: z.string().optional().describe("Defaults to the Captions track.") },
+  async ({ project, outPath, trackId }) => {
+    const p = loadProject(projectPath(project));
+    const srt = toSrt(p, { trackId });
+    const file = resolve(outPath.endsWith(".srt") ? outPath : `${outPath}.srt`);
+    writeFileSync(file, srt, "utf8");
+    return text({ path: file, lines: srt ? srt.split("\n\n").length : 0, track: (trackId ? trackById(p, trackId) : captionsTrack(p))?.name });
+  },
+);
+
+tool(
+  "captions_import",
+  "Import subtitles from an .srt or .vtt file as caption text clips on a new Captions track (timings are timeline seconds).",
+  { ...projectArg, path: z.string(), styleId: z.enum(ids(TEXT_STYLES)).optional(), offset: z.number().optional().describe("Shift every line by this many seconds.") },
+  editTool((p, { path, styleId = "subtitle", offset = 0 }) => {
+    const lines = parseSubtitles(readFileSync(path, "utf8"))
+      .map((l) => ({ ...l, start: l.start + offset, end: l.end + offset }))
+      .filter((l) => l.end > 0)
+      .map((l) => ({ ...l, start: Math.max(0, l.start) }));
+    if (!lines.length) throw new Error(`No subtitles found in ${path}`);
+    return { project: ops.addTextTrack(p, lines, { name: "Captions", style: byId(TEXT_STYLES, styleId).style }).project, note: `${lines.length} captions` };
+  }),
+);
+
+tool(
   "beats_detect",
   "Mark the beats of a music clip on the timeline (markers labeled beat), for cutting to the rhythm.",
   { ...projectArg, clipId: z.string(), sensitivity: z.number().min(0).max(1).optional() },
@@ -390,6 +469,101 @@ tool(
   "Remove all zoom/pan keyframes from a clip.",
   { ...projectArg, clipId: z.string() },
   editTool((p, { clipId }) => ops.clearKeyframes(p, clipId)),
+);
+
+// ---- pro editing (ideas from Premiere Pro / DaVinci Resolve, made simple)
+tool(
+  "track_set",
+  "Change a track: name, mute, hide, and the mixer (volume 1 = 0 dB up to 4, pan -1 left .. 1 right, solo). role tags the sound (dialogue/music/sfx/ambience); duck lowers this track while any dialogue track is talking (amount 0..100).",
+  {
+    ...projectArg,
+    trackId: z.string(),
+    name: z.string().optional(),
+    muted: z.boolean().optional(),
+    hidden: z.boolean().optional(),
+    volume: z.number().min(0).max(4).optional(),
+    pan: z.number().min(-1).max(1).optional(),
+    solo: z.boolean().optional(),
+    role: z.enum(ROLES).nullable().optional(),
+    duck: z.object({ enabled: z.boolean().optional(), amount: z.number().min(0).max(100).optional() }).optional(),
+  },
+  editTool((p, { project, trackId, duck, ...patch }) => {
+    const t = trackById(p, trackId);
+    if (!t) throw new Error(`No track ${trackId}`);
+    if (t.kind === "text" && (patch.volume != null || patch.pan != null || patch.solo != null || patch.role !== undefined || duck)) throw new Error("Text tracks have no sound");
+    return ops.setTrack(p, trackId, { ...patch, ...(duck ? { duck: { ...t.duck, ...duck } } : {}) });
+  }),
+);
+
+tool(
+  "adjustment_add",
+  "Add an adjustment layer (an empty clip on the top video track). Its color, looks and effects (set them with clip_set) apply to every clip beneath it for as long as it lasts.",
+  { ...projectArg, start: z.number().min(0), duration: z.number().positive().optional() },
+  editTool((p, { start, duration = 5 }) => {
+    const r = ops.addAdjustment(p, { start, duration });
+    return { project: r.project, note: `Adjustment layer ${r.clip.id}` };
+  }),
+);
+
+tool(
+  "roll_edit",
+  "Roll edit: move the cut between two touching clips on a track by `delta` seconds (+ later). The left clip gets longer as the right one gets shorter, so nothing else moves. Clamped to the source both clips have.",
+  { ...projectArg, leftClipId: z.string(), rightClipId: z.string(), delta: z.number() },
+  editTool((p, { leftClipId, rightClipId, delta }) => ops.rollEdit(p, leftClipId, rightClipId, delta)),
+);
+
+tool(
+  "clip_slip",
+  "Slip edit: show a later (+) or earlier (-) part of the source inside the same clip, without moving it on the timeline.",
+  { ...projectArg, clipId: z.string(), delta: z.number() },
+  editTool((p, { clipId, delta }) => ops.slipClip(p, clipId, delta)),
+);
+
+tool(
+  "speed_ramp",
+  `Speed ramp preset: the clip becomes ${Object.values(ops.SPEED_RAMPS)[0].speeds.length} pieces whose speeds follow a curve (pitch is kept). Presets: ${Object.entries(ops.SPEED_RAMPS).map(([k, v]) => `${k} = ${v.label}`).join("; ")}.`,
+  { ...projectArg, clipId: z.string(), preset: z.enum(Object.keys(ops.SPEED_RAMPS)) },
+  editTool((p, { clipId, preset }) => ops.speedRamp(p, clipId, preset)),
+);
+
+tool(
+  "title_add",
+  `Add an animated title from a template: ${TITLE_TEMPLATES.map((t) => `${t.id} (${t.name})`).join(", ")}. text replaces the template's placeholder (a newline makes a second line).`,
+  { ...projectArg, templateId: z.enum(TITLE_TEMPLATES.map((t) => t.id)), start: z.number().min(0), text: z.string().optional() },
+  editTool((p, { templateId, start, text: body }) => {
+    const r = ops.addTitle(p, templateId, { start, text: body });
+    return { project: r.project, note: `Title ${r.clip.id}` };
+  }),
+);
+
+tool(
+  "source_place",
+  "Three-point edit from a media item's in/out (source seconds) at timeline time `at`. mode: insert (opens room on every track, so sync is kept), overwrite (replaces what's on the target track), append (end of the track), top (a free track above, e.g. B-roll).",
+  { ...projectArg, mediaId: z.string(), in: z.number().min(0), out: z.number().positive(), at: z.number().min(0).optional(), mode: z.enum(["insert", "overwrite", "append", "top"]).optional(), trackId: z.string().optional() },
+  editTool((p, { mediaId, in: inn, out, at = 0, mode = "insert", trackId }) => {
+    const r = ops.placeSource(p, { mediaId, in: inn, out, at, mode, trackId });
+    return { project: r.project, note: `Clip ${r.clip.id}` };
+  }),
+);
+
+tool(
+  "gaps_close",
+  "Close every gap on every track (each track keeps its clip order).",
+  projectArg,
+  editTool((p) => ops.closeGaps(p)),
+);
+
+tool(
+  "scenes_split",
+  "Scene cut detection: find the camera cuts inside a video clip (ffmpeg scene score) and split the clip at each one.",
+  { ...projectArg, clipId: z.string(), threshold: z.number().min(0.05).max(0.9).optional().describe("Scene-change score 0..1 (default 0.35; lower finds more cuts).") },
+  editTool(async (p, { clipId, threshold = 0.35 }) => {
+    const c = clipById(p, clipId);
+    if (!c || !hasMedia(c)) throw new Error("Pick a video clip");
+    const m = mediaById(p, c.mediaId);
+    const times = (await detectScenes(m, { threshold })).filter((s) => s > c.in + 0.2 && s < c.out - 0.2);
+    return { project: ops.splitAtSourceTimes(p, m.id, times), note: `${times.length} scene change${times.length === 1 ? "" : "s"}` };
+  }),
 );
 
 // ---- bleeps, cuts, pauses
@@ -442,6 +616,60 @@ tool(
     const total = ranges.reduce((s, [a, b]) => s + b - a, 0);
     return text({ media: media.name, count: ranges.length, totalSeconds: round(total), ranges });
   },
+);
+
+// ---- text-based editing (edit the video by editing its transcript)
+function pickAudible(p, mediaId) {
+  const used = new Set(p.clips.map((c) => c.mediaId));
+  const audible = p.media.filter((m) => used.has(m.id) && m.hasAudio);
+  const media = mediaId ? mediaById(p, mediaId) : (audible.find((m) => !m.hasVideo) ?? audible[0]);
+  if (!media) throw new Error("No media with audio on the timeline");
+  return media;
+}
+
+function wordsOnTimeline(p, media) {
+  const t = p.transcripts[media.id];
+  if (!t) throw new Error(`${media.name} has no transcript yet. Call transcript_create first.`);
+  return timelineWords(p, media.id, t.words);
+}
+
+tool(
+  "transcript_create",
+  "Transcribe a media item word by word (faster-whisper large-v3, local; filler words like um/uh are kept) and store it in the project for text-based editing. Then use transcript_words and words_remove.",
+  { ...projectArg, mediaId: z.string().optional().describe("Defaults to the first audio-only media on the timeline, else the first with audio."), language: z.string().optional().describe("ISO code like en or ar; default auto-detect.") },
+  editTool(async (p, { mediaId, language = "auto" }) => {
+    const media = pickAudible(p, mediaId);
+    const result = await transcribe(media, { language, fillers: true });
+    const words = wordsFromSegments(result.segments);
+    return { project: ops.setTranscript(p, media.id, { language: result.language, words }), note: `${words.length} words, language ${result.language}` };
+  }),
+);
+
+tool(
+  "transcript_words",
+  "Read the transcript as it plays on the timeline (cut-out words are gone): rows of [index, start, end, word] in timeline seconds, plus the plain text. Filter by a time window, or fillersOnly to list um/uh-type words.",
+  { ...projectArg, mediaId: z.string().optional(), from: z.number().optional(), to: z.number().optional(), fillersOnly: z.boolean().optional() },
+  async ({ project, mediaId, from = 0, to = Infinity, fillersOnly }) => {
+    const p = loadProject(projectPath(project));
+    const media = pickAudible(p, mediaId);
+    const words = wordsOnTimeline(p, media).filter((w) => w.end > from && w.start < to && (!fillersOnly || w.filler));
+    return text({ media: media.name, mediaId: media.id, count: words.length, text: words.map((w) => w.text).join(" "), words: words.map((w) => [w.i, round(w.start), round(w.end), w.text]) });
+  },
+);
+
+tool(
+  "words_remove",
+  "Text-based cut: remove words from the edit by their transcript index (from transcript_words), or every filler word with fillers=true. The timeline closes up (ripple) on every track.",
+  { ...projectArg, mediaId: z.string().optional(), indices: z.array(z.number().int().min(0)).optional(), fillers: z.boolean().optional() },
+  editTool((p, { mediaId, indices = [], fillers }) => {
+    const media = pickAudible(p, mediaId);
+    const pick = new Set(indices);
+    const words = wordsOnTimeline(p, media).filter((w) => pick.has(w.i) || (fillers && w.filler));
+    if (!words.length) throw new Error("None of those words are on the timeline");
+    const before = projectDuration(p);
+    const next = ops.removeRanges(p, wordRanges(words));
+    return { project: next, note: `Cut ${words.length} word${words.length === 1 ? "" : "s"} (${round(before - projectDuration(next))} s)` };
+  }),
 );
 
 // ---- CapCut interop
@@ -509,6 +737,7 @@ tool(
     quality: z.enum(["high", "recommended", "compact"]).optional(),
     resolution: z.number().int().positive().optional(),
     fps: z.number().positive().optional(),
+    loudness: z.number().min(-30).max(-8).nullable().optional().describe("Normalize the mix to this LUFS (-14 YouTube/Spotify, -16 podcasts, -23 broadcast). Defaults to the project's loudness setting; null turns it off."),
   },
   async ({ project, outPath, ...settings }, extra) => {
     const path = projectPath(project);

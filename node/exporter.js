@@ -78,17 +78,18 @@ const jobDir = () => {
  * @param {"high"|"recommended"|"compact"} [opts.quality]
  * @param {number} [opts.resolution] output short side (720, 1080, 1440, 2160)
  * @param {number} [opts.fps] output frame rate (defaults to the project's)
+ * @param {number|null} [opts.loudness] master loudness target in LUFS (e.g. -14); null = off, omitted = the project setting
  * @returns {Promise<{ path: string, duration: number, seconds: number, encoder: string }>}
  */
 export async function renderProject(project, opts = {}) {
-  const { outPath, preset, range, background, quality = "recommended", resolution, onProgress, signal } = opts;
+  const { outPath, preset, range, background, quality = "recommended", resolution, loudness, onProgress, signal } = opts;
   if (!outPath) throw new Error("outPath is required");
   // Older callers passed `encoder: x264|nvenc|qsv|amf` for H.264.
   const codec = opts.codec ?? "h264";
   const hardware = opts.hardware ?? (opts.encoder ? (opts.encoder === "x264" ? "cpu" : opts.encoder) : "auto");
   const [encName, byQuality, extra] = await pickEncoder(codec, hardware);
   const tmp = jobDir();
-  const plan = buildRenderPlan(project, { preset, range, background, outShortSide: resolution, tmpDir: tmp });
+  const plan = buildRenderPlan(project, { preset, range, background, outShortSide: resolution, loudness: (loudness === undefined ? project.settings?.loudness : loudness) ?? undefined, tmpDir: tmp });
   const { dir, graphFile } = prepare(plan);
   mkdirSync(dirname(outPath), { recursive: true });
   const audioArgs = plan.audio ? (codec === "prores" ? ["-c:a", "pcm_s16le"] : ["-c:a", "aac", "-b:a", "192k"]) : [];

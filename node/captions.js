@@ -14,18 +14,18 @@ const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "t
 /**
  * @returns {Promise<{ language: string, segments: { start: number, end: number, text: string, words: object[] }[] }>}
  */
-export async function transcribe(media, { language = "auto", model = process.env.CUTROOM_WHISPER_MODEL || "large-v3", onProgress, signal } = {}) {
+export async function transcribe(media, { language = "auto", model = process.env.CUTROOM_WHISPER_MODEL || "large-v3", fillers = false, onProgress, signal } = {}) {
   if (!media.hasAudio) throw new Error(`${media.name} has no audio`);
   mkdirSync(CACHE_DIR, { recursive: true });
   const st = statSync(media.path);
-  const key = createHash("sha1").update(`${media.path}|${st.size}|${st.mtimeMs}|${model}|${language}`).digest("hex").slice(0, 20);
+  const key = createHash("sha1").update(`${media.path}|${st.size}|${st.mtimeMs}|${model}|${language}|${fillers ? "f" : ""}`).digest("hex").slice(0, 20);
   const cache = join(CACHE_DIR, `${key}-captions.json`);
   if (existsSync(cache)) return JSON.parse(readFileSync(cache, "utf8"));
   const result = await new Promise((resolve, reject) => {
     // PYTHONSAFEPATH keeps the working directory off sys.path (a planted
     // module there can't shadow imports) while user site-packages, where
     // faster-whisper usually lives, stay available (python -I would drop them).
-    const child = spawn(PYTHON, [SCRIPT, media.path, "--model", model, "--language", language], { windowsHide: true, env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONSAFEPATH: "1" } });
+    const child = spawn(PYTHON, [SCRIPT, media.path, "--model", model, "--language", language, ...(fillers ? ["--fillers"] : [])], { windowsHide: true, env: { ...process.env, PYTHONIOENCODING: "utf-8", PYTHONSAFEPATH: "1" } });
     let buf = "";
     let err = "";
     let final = null;

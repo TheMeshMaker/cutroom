@@ -10,7 +10,7 @@
 //   audio       -> every unmuted track mixed, bleeps mute the mix + add a tone
 
 import { ANIMATIONS, EFFECTS, FILTERS, TRANSITIONS, VOICE_EFFECTS, byId, fontFile } from "./catalog.js";
-import { clipEnd, clipLength, effectiveAdjust, evaluateClip, isText, mediaById, videoLayers } from "./model.js";
+import { clipEnd, clipLength, effectiveAdjust, evaluateClip, hasMedia, isAdjustment, mediaById, videoLayers } from "./model.js";
 
 export const EXPORT_PRESETS = {
   landscape: { label: "Project canvas" },
@@ -76,7 +76,7 @@ export function buildRenderPlan(project, opts = {}) {
   // starts, `pre`/`post` extra handle seconds rendered for transitions.
   const segmentsOf = (track) => {
     const segs = project.clips
-      .filter((c) => c.trackId === track.id && !isText(c))
+      .filter((c) => c.trackId === track.id && hasMedia(c))
       .map((c) => {
         const s = Math.max(c.start, r0);
         const e = Math.min(clipEnd(c), r1);
@@ -159,6 +159,19 @@ export function buildRenderPlan(project, opts = {}) {
     let comp = next("base");
     chains.push(`color=c=black:s=${W}x${H}:r=${f(fps)}:d=${f(total)},format=yuv420p,setsar=1[${comp}]`);
     for (const track of videoLayers(project).filter((t) => !t.hidden)) {
+      // Adjustment layers on this track grade everything composited so far.
+      const adjustments = project.clips
+        .filter((c) => c.trackId === track.id && isAdjustment(c))
+        .map((c) => ({ c, a: Math.max(c.start, r0) - r0, b: Math.min(clipEnd(c), r1) - r0 }))
+        .filter((x) => x.b - x.a > EPS);
+      if (adjustments.length) {
+        const filters = adjustments.flatMap(({ c, a, b }) => clipLookFilters(c, { timeline: true }).map((flt) => withEnable(flt, `between(t,${f(a)},${f(b)})`)));
+        if (filters.length) {
+          const l = next("adj");
+          chains.push(`[${comp}]${filters.join(",")},format=yuv420p[${l}]`);
+          comp = l;
+        }
+      }
       const segs = segmentsOf(track).filter((s) => s.media.hasVideo);
       if (!segs.length) continue;
       const gap = (d) => {
@@ -223,9 +236,12 @@ export function buildRenderPlan(project, opts = {}) {
       chains.push(`anullsrc=r=${SAMPLE_RATE}:cl=stereo,atrim=duration=${f(d)}[${l}]`);
       return l;
     };
-    const mixInputs = [];
+    const streams = []; // { label, track }
+    const soloing = project.tracks.some((t) => t.solo && t.kind !== "text");
     for (const track of project.tracks) {
       if (track.kind === "text" || track.muted || (track.kind === "video" && track.hidden)) continue;
+      if (soloing && !track.solo) continue;
+      if (track.volume <= 0) continue;
       const segs = segmentsOf(track);
       if (!segs.some((s) => s.media.hasAudio && !s.clip.muted && s.clip.volume > 0)) continue;
       const piece = (seg) => {
@@ -239,14 +255,60 @@ export function buildRenderPlan(project, opts = {}) {
         return l;
       };
       const join = (tr) => `acrossfade=d=${f(tr.d)}:c1=tri:c2=tri`;
-      mixInputs.push(tile(segs, silence, piece, join, "a"));
+      let label = tile(segs, silence, piece, join, "a");
+      // Track fader and pan.
+      const strip = [];
+      if (Math.abs(track.volume - 1) > EPS) strip.push(`volume=${f(track.volume)}`);
+      if (Math.abs(track.pan) > EPS) {
+        const l = Math.min(1, 1 - track.pan);
+        const r = Math.min(1, 1 + track.pan);
+        strip.push(`pan=stereo|c0=${f(l)}*c0|c1=${f(r)}*c1`);
+      }
+      if (strip.length) {
+        const out = next("trk");
+        chains.push(`[${label}]${strip.join(",")}[${out}]`);
+        label = out;
+      }
+      streams.push({ label, track });
     }
+    // Auto-ducking: tracks with duck on are compressed by the dialogue mix.
+    const ducked = streams.filter((s) => s.track.duck.enabled && s.track.role !== "dialogue");
+    const dialogue = streams.filter((s) => s.track.role === "dialogue");
+    if (ducked.length && dialogue.length) {
+      const keys = [];
+      for (const s of dialogue) {
+        const [keep, key] = [next("dl"), next("dk")];
+        chains.push(`[${s.label}]asplit=2[${keep}][${key}]`);
+        s.label = keep;
+        keys.push(key);
+      }
+      let side = keys[0];
+      if (keys.length > 1) {
+        side = next("dmix");
+        chains.push(`${keys.map((k) => `[${k}]`).join("")}amix=inputs=${keys.length}:duration=longest:normalize=0[${side}]`);
+      }
+      const sides = ducked.map(() => next("sc"));
+      chains.push(sides.length > 1 ? `[${side}]asplit=${sides.length}${sides.map((x) => `[${x}]`).join("")}` : `[${side}]anull[${sides[0]}]`);
+      ducked.forEach((s, i) => {
+        const out = next("duck");
+        const ratio = 2 + (18 * s.track.duck.amount) / 100;
+        chains.push(`[${s.label}][${sides[i]}]sidechaincompress=threshold=0.03:ratio=${f(ratio)}:attack=20:release=400:makeup=1[${out}]`);
+        s.label = out;
+      });
+    }
+    const mixInputs = streams.map((s) => s.label);
     let mix;
     if (!mixInputs.length) mix = silence(total);
     else if (mixInputs.length === 1) mix = mixInputs[0];
     else {
       mix = next("mix");
       chains.push(`${mixInputs.map((m) => `[${m}]`).join("")}amix=inputs=${mixInputs.length}:duration=longest:normalize=0[${mix}]`);
+    }
+    // Master loudness target (e.g. -14 LUFS for YouTube).
+    if (opts.loudness) {
+      const l = next("loud");
+      chains.push(`[${mix}]loudnorm=I=${f(opts.loudness)}:TP=-1:LRA=11,aresample=${SAMPLE_RATE}[${l}]`);
+      mix = l;
     }
     const bleeps = project.bleeps.map((b) => [Math.max(b.start, r0) - r0, Math.min(b.end, r1) - r0]).filter(([a, b]) => b - a > EPS);
     audioLabel = next("aout");
@@ -279,14 +341,7 @@ function videoFilters(seg, { W, H, fps, next }) {
   if (c.flipH) out.push("hflip");
   if (c.flipV) out.push("vflip");
   out.push(`scale=${W}:${H}:force_original_aspect_ratio=decrease:flags=bicubic`);
-  out.push(...adjustFilters(effectiveAdjust(c)));
-  const look = c.filter && byId(FILTERS, c.filter.id);
-  if (look?.extra) out.push(look.extra(c.filter.intensity / 100));
-  if (c.lut) out.push(`lut3d=file=${filterPath(c.lut)}:interp=tetrahedral`);
-  for (const fx of c.effects) {
-    const def = byId(EFFECTS, fx.id);
-    if (def?.chain) out.push(def.chain(fx.intensity / 100, next("fx")));
-  }
+  out.push(...clipLookFilters(c, { next }));
   out.push("format=yuva420p");
   if (c.chroma.enabled) out.push(`chromakey=color=${hexColor(c.chroma.color).slice(0, 8)}:similarity=${f(c.chroma.similarity)}:blend=${f(c.chroma.blend)}`);
   out.push(`pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black@0`, "setsar=1");
@@ -300,6 +355,73 @@ function videoFilters(seg, { W, H, fps, next }) {
   out.push(...transformFilters(seg, { W, H, fps }));
   out.push(...fadeFilters(seg, { W, H, fps, next }));
   return out.join(",");
+}
+
+// Effects whose filters can be switched on for part of the timeline (needed
+// by adjustment layers, which use `enable`).
+const TIMELINE_EFFECTS = new Set(["blur", "grain", "rgb-split", "bw", "invert", "sketch"]);
+
+// Everything that changes a clip's picture (not its geometry): denoise, color
+// wheels and curve, adjustments, look, LUT, effects.
+function clipLookFilters(c, { next, timeline = false } = {}) {
+  const out = [];
+  if (c.videoDenoise > 0) {
+    const s = c.videoDenoise / 100;
+    out.push(`hqdn3d=${f(1 + 5 * s)}:${f(1 + 4 * s)}:${f(2 + 8 * s)}:${f(2 + 6 * s)}`);
+  }
+  out.push(...colorFilters(c.color));
+  out.push(...adjustFilters(effectiveAdjust(c)));
+  const look = c.filter && byId(FILTERS, c.filter.id);
+  if (look?.extra) out.push(look.extra(c.filter.intensity / 100));
+  if (c.lut) out.push(`lut3d=file=${filterPath(c.lut)}:interp=tetrahedral`);
+  for (const fx of c.effects) {
+    const def = byId(EFFECTS, fx.id);
+    if (!def?.chain || (timeline && !TIMELINE_EFFECTS.has(fx.id))) continue;
+    out.push(def.chain(fx.intensity / 100, next?.("fx") ?? "fx"));
+  }
+  return out;
+}
+
+// Wheel puck (x, y) is a push toward a hue on the color wheel; convert it to
+// an RGB shift (like moving U/V).
+export function wheelRgb({ x, y }) {
+  return { r: 1.402 * y, g: -0.344 * x - 0.714 * y, b: 1.772 * x };
+}
+
+// Primary wheels -> colorbalance (lift = shadows, gamma = midtones, gain =
+// highlights, offset = all), wheel luminance + custom curve -> curves.
+export function colorFilters(col) {
+  const out = [];
+  if (!col) return out;
+  const k = 0.25;
+  const L = wheelRgb(col.lift);
+  const G = wheelRgb(col.gamma);
+  const H = wheelRgb(col.gain);
+  const O = wheelRgb(col.offset);
+  const parts = [];
+  const add = (key, v) => Math.abs(v) > 1e-4 && parts.push(`${key}=${f(Math.max(-1, Math.min(1, v * k)))}`);
+  for (const ch of ["r", "g", "b"]) {
+    add(`${ch}s`, L[ch] + O[ch]);
+    add(`${ch}m`, G[ch] + O[ch]);
+    add(`${ch}h`, H[ch] + O[ch]);
+  }
+  if (parts.length) out.push(`colorbalance=${parts.join(":")}`);
+  const { lift, gamma, gain, offset } = col;
+  if ([lift.l, gamma.l, gain.l, offset.l].some((v) => Math.abs(v) > 1e-4)) {
+    const lo = Math.max(0, Math.min(0.4, 0.2 * lift.l + 0.15 * offset.l));
+    const hi = Math.max(0.6, Math.min(1, 1 + 0.25 * gain.l + 0.15 * offset.l));
+    const mid = Math.max(lo + 0.02, Math.min(hi - 0.02, lo + (hi - lo) * (0.5 + 0.18 * gamma.l)));
+    out.push(`curves=master='0/${f(lo)} 0.5/${f(mid)} 1/${f(hi)}'`);
+  }
+  const curve = col.curve ?? [];
+  const identity = curve.length === 2 && curve[0][0] === 0 && curve[0][1] === 0 && curve[1][0] === 1 && curve[1][1] === 1;
+  if (curve.length >= 2 && !identity) out.push(`curves=master='${curve.map(([x, y]) => `${f(x)}/${f(y)}`).join(" ")}'`);
+  return out;
+}
+
+// Add `enable` (timeline window) to one filter string.
+function withEnable(filter, expr) {
+  return filter.includes("=") ? `${filter}:enable='${expr}'` : `${filter}=enable='${expr}'`;
 }
 
 export function adjustFilters(a) {

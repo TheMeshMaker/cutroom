@@ -1,6 +1,6 @@
 {
   "name": "cutroom",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "A CapCut-style desktop video editor with pro features, local auto captions and a built-in MCP server.",
   "author": "TheMeshMaker",

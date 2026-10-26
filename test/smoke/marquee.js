@@ -5,7 +5,8 @@
   const lanes = [...document.querySelectorAll(".track-row .tl-lane")];
   const lane = lanes[lanes.length - 1];
   const r = lane.getBoundingClientRect();
-  const x0 = r.right - 20;
+  const visibleRight = document.querySelector(".tl-scroll").getBoundingClientRect().right;
+  const x0 = Math.min(r.right, visibleRight) - 20;
   const y0 = r.top + r.height / 2;
   lane.dispatchEvent(new PointerEvent("pointerdown", { clientX: x0, clientY: y0, bubbles: true, button: 0 }));
   for (let i = 1; i <= 6; i++) {

@@ -8,7 +8,8 @@ import { fileURLToPath } from "node:url";
 import { CACHE_DIR } from "./media.js";
 
 const PYTHON = process.env.CUTROOM_PYTHON || "python";
-const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "transcribe.py");
+// In a packaged app the script is unpacked next to app.asar so Python can read it.
+const SCRIPT = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "transcribe.py").replace(/app\.asar([\\/])/, "app.asar.unpacked$1");
 
 /**
  * @returns {Promise<{ language: string, segments: { start: number, end: number, text: string, words: object[] }[] }>}

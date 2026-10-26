@@ -54,7 +54,14 @@ See [docs/capcut-findings.md](docs/capcut-findings.md) for the architecture
 study behind the design. Cutroom uses none of CapCut's code, assets or
 branding.
 
-## Run it
+## Download
+
+Windows 10/11 x64 builds are on the
+[Releases](https://github.com/TheMeshMaker/cutroom/releases) page: an
+installer and a portable zip. FFmpeg is bundled, and the builds are currently
+early access and unsigned.
+
+## Run from source
 
 Requires Node.js 22+ and FFmpeg 7+ (`ffmpeg`/`ffprobe` on PATH, or set
 `CUTROOM_FFMPEG` / `CUTROOM_FFPROBE`). Auto captions need Python with
@@ -66,7 +73,12 @@ npm install
 npm start          # build the UI and open the app
 npm run dev        # hot-reloading UI during development
 npm test           # core, feature and MCP tests (real FFmpeg renders)
+npm run dist       # Windows installer + portable zip in release/ (bundles vendor/ffmpeg)
 ```
+
+`npm run dist` expects `ffmpeg.exe`, `ffprobe.exe` and their license files in
+`vendor/ffmpeg/` (not committed). The packaged app uses that bundled copy
+unless `CUTROOM_FFMPEG` / `CUTROOM_FFPROBE` are set.
 
 ## Use it with Claude (MCP)
 

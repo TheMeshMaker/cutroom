@@ -1,18 +1,20 @@
 {
   "name": "cutroom",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "An agent-native desktop video editor: plain-JSON projects, live reload, FFmpeg export and a built-in MCP server.",
+  "description": "A CapCut-style desktop video editor with pro features, local auto captions and a built-in MCP server.",
+  "author": "TheMeshMaker",
   "license": "MIT",
   "type": "module",
-  "main": "electron/main.mjs",
+  "main": "electron/boot.mjs",
   "scripts": {
     "dev": "node scripts/dev.mjs",
     "build": "vite build",
     "start": "vite build && electron .",
     "mcp": "node mcp/server.mjs",
     "test": "node --test \"test/*.test.js\"",
-    "smoke": "vite build && electron . --smoke"
+    "smoke": "vite build && electron . --smoke",
+    "dist": "vite build && electron-builder --win --x64"
   },
   "allowScripts": {
     "electron": true,
@@ -20,13 +22,47 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "react": "^19.3.1",
-    "react-dom": "^19.3.1",
     "zod": "^4.6.7"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.1.2",
     "electron": "^45.0.0",
+    "electron-builder": "^26.18.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "vite": "^8.3.5"
+  },
+  "build": {
+    "appId": "com.themeshmaker.cutroom",
+    "productName": "Cutroom",
+    "copyright": "Copyright © 2026 TheMeshMaker",
+    "directories": { "output": "release", "buildResources": "build" },
+    "files": [
+      "dist/**",
+      "electron/**",
+      "core/**",
+      "node/**",
+      "scripts/transcribe.py",
+      "package.json",
+      "!**/node_modules/**"
+    ],
+    "asarUnpack": ["scripts/transcribe.py"],
+    "extraResources": [{ "from": "vendor/ffmpeg", "to": "ffmpeg" }],
+    "win": {
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "zip", "arch": ["x64"] }
+      ],
+      "icon": "build/icon.png",
+      "artifactName": "Cutroom-${version}-early-access-win-x64-portable.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Cutroom",
+      "artifactName": "Cutroom-Setup-${version}-early-access.exe"
+    }
   }
 }

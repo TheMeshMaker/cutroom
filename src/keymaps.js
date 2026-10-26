@@ -30,6 +30,13 @@ const COMMON = {
   ".": "sourceOverwrite",
   "shift+m": "nextMarker",
   "ctrl+shift+m": "prevMarker",
+  "ctrl+a": "selectAll",
+  "ctrl+shift+a": "deselect",
+  "ctrl+d": "duplicate",
+  "alt+arrowleft": "nudgeLeft",
+  "alt+arrowright": "nudgeRight",
+  "shift+/": "shortcuts",
+  f1: "shortcuts",
 };
 
 export const KEYMAPS = {
@@ -101,7 +108,7 @@ export const KEYMAPS = {
   },
 };
 
-const CODE_KEYS = { Space: "space", BracketLeft: "[", BracketRight: "]", Backslash: "\\", Equal: "=", Minus: "-", Comma: ",", Period: ".", Semicolon: ";", Quote: "'", Backquote: "`", NumpadAdd: "=", NumpadSubtract: "-" };
+const CODE_KEYS = { Slash: "/", Space: "space", BracketLeft: "[", BracketRight: "]", Backslash: "\\", Equal: "=", Minus: "-", Comma: ",", Period: ".", Semicolon: ";", Quote: "'", Backquote: "`", NumpadAdd: "=", NumpadSubtract: "-" };
 
 export function comboOf(e) {
   let key = CODE_KEYS[e.code];
@@ -127,6 +134,7 @@ export function shortcutFor(action, keymap) {
   if (!entry) return "";
   return entry[0]
     .split("+")
-    .map((k) => ({ ctrl: "Ctrl", alt: "Alt", shift: "Shift", space: "Space", arrowleft: "←", arrowright: "→", delete: "Del", backspace: "Backspace", escape: "Esc", home: "Home", end: "End" })[k] ?? k.toUpperCase())
-    .join("+");
+    .map((k) => ({ ctrl: "Ctrl", alt: "Alt", shift: "Shift", space: "Space", arrowleft: "←", arrowright: "→", arrowup: "↑", arrowdown: "↓", delete: "Del", backspace: "Backspace", escape: "Esc", home: "Home", end: "End" })[k] ?? k.toUpperCase())
+    .join("+")
+    .replace("Shift+/", "?");
 }

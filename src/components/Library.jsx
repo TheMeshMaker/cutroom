@@ -100,35 +100,58 @@ function MediaTab() {
         {visual.map((m) => {
           const proxy = proxies[m.id];
           const progress = proxy && typeof proxy === "object" && !proxy.error ? proxy.progress ?? 0 : null;
-          return (
-            <div
-              key={m.id}
-              className="media-card"
-              draggable
-              onDragStart={(e) => {
-                e.dataTransfer.setData("application/x-cutroom-media", m.id);
-                e.dataTransfer.effectAllowed = "copy";
-              }}
-              onDoubleClick={() => actions.openSource(m.id)}
-              title={`${m.path}\nDouble-click: open in the source monitor · drag or + to add`}
-            >
-              <Thumb media={m} strips={strips} />
-              {m.kind !== "image" && <span className="dur">{formatTime(m.duration).replace(/:\d\d$/, "")}</span>}
-              {used.has(m.id) && <span className="added">Added</span>}
-              {progress != null && (
-                <div className="card-progress">
-                  <div style={{ width: `${Math.round(progress * 100)}%` }} />
-                </div>
-              )}
-              <button className="card-add" onClick={() => actions.addMedia(m.id)} title="Add to timeline">
-                <Icon name="plus" size={14} />
-              </button>
-              <div className="card-name">{m.name}</div>
-            </div>
-          );
+          return <MediaCard key={m.id} m={m} strips={strips} used={used.has(m.id)} progress={progress} actions={actions} />;
         })}
       </div>
+      {!visual.length && <p className="muted small lib-hint">Import videos and photos, then drag them onto the timeline. Hover a clip to preview it, double-click to open it in the source monitor.</p>}
     </Section>
+  );
+}
+
+// A media item: hover and move across it to preview the footage.
+function MediaCard({ m, strips, used, progress, actions }) {
+  const [scrub, setScrub] = useState(null); // 0..1 across the card
+  const canScrub = m.kind !== "image" && strips[m.id];
+  return (
+    <div
+      className="media-card"
+      draggable
+      onDragStart={(e) => {
+        setScrub(null);
+        e.dataTransfer.setData("application/x-cutroom-media", m.id);
+        e.dataTransfer.effectAllowed = "copy";
+      }}
+      onDoubleClick={() => actions.openSource(m.id)}
+      title={`${m.name}\nDouble-click: open in the source monitor · drag or + to add`}
+    >
+      <div
+        className="thumb-wrap"
+        onPointerMove={(e) => {
+          if (!canScrub) return;
+          const r = e.currentTarget.getBoundingClientRect();
+          setScrub(Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)));
+        }}
+        onPointerLeave={() => setScrub(null)}
+      >
+        <Thumb media={m} strips={strips} at={scrub != null ? scrub * m.duration : undefined} />
+        {scrub != null && <span className="scrub-line" style={{ left: `${scrub * 100}%` }} />}
+        {m.kind !== "image" && <span className="dur">{scrub != null ? formatTime(scrub * m.duration).replace(/:\d\d$/, "") : formatTime(m.duration).replace(/:\d\d$/, "")}</span>}
+        {used && (
+          <span className="added" title="On the timeline">
+            <Icon name="check" size={10} />
+          </span>
+        )}
+        {progress != null && (
+          <div className="card-progress">
+            <div style={{ width: `${Math.round(progress * 100)}%` }} />
+          </div>
+        )}
+        <button className="card-add" onClick={() => actions.addMedia(m.id)} title="Add to timeline">
+          <Icon name="plus" size={14} />
+        </button>
+      </div>
+      <div className="card-name">{m.name}</div>
+    </div>
   );
 }
 

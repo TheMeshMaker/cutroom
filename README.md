@@ -16,6 +16,15 @@ the right tools for each job, and a **Projects** home lists your recent work.
 - **Editing:** split, delete left/right of the playhead (Q/W), ripple delete,
   copy/paste, blade tool, snapping, a main-track magnet, lockable/hideable
   tracks, filmstrips and waveforms, undo/redo and autosave.
+- **Timeline that's easy to work in:**
+  - Drag on empty space to box-select clips (Shift/Ctrl adds), then drag any
+    of them to move the whole selection.
+  - Right-click a clip, track or empty spot for its actions: speed, reverse,
+    freeze, label color, delete, add a track…
+  - Select all (Ctrl+A), duplicate (Ctrl+D), copy/paste several clips with
+    their spacing kept, nudge by a frame (Alt+←/→).
+  - Snap guides while dragging, a time readout on the ruler, compact/normal/tall
+    tracks, track rename, and an Undo button on every delete.
 - **Speed and time:** constant speed 0.1–10× with pitch kept, reverse, and
   freeze frame.
 - **Framing:** scale, position, rotation, flip, opacity and crop. Zoom and pan
@@ -72,6 +81,10 @@ the right tools for each job, and a **Projects** home lists your recent work.
     Restore an earlier version.
   - **Keyboard presets** for CapCut, Premiere Pro and DaVinci Resolve, and a
     command palette (Ctrl+Shift+P) where you type what you want.
+- **Polished, themeable UI:** six accent colors (Menu → Theme color), tooltips
+  on every control, sliders you can drag by their label (double-click
+  resets), hover-scrub previews in the media library, a loop button,
+  safe-area/thirds guides on the player and a keyboard-shortcut sheet (`?`).
 - **Agent-native:** the project is readable JSON. The app live-reloads outside
   edits, and the built-in MCP server lets Claude (or any MCP client) use every
   feature.
@@ -118,8 +131,9 @@ Tools:
   `settings_set` (magnet, loudness), `catalog_list`, `backups_list`,
   `backup_restore`
 - **Media and clips:** `media_import`, `clip_add`, `clip_split`, `clip_trim`,
-  `clip_move`, `clip_delete`, `clip_set` (every clip property, including the
-  color wheels, curve and video noise reduction)
+  `clip_move`, `clip_delete`, `clips_move`, `clips_duplicate`, `clip_set`
+  (every clip property, including the color wheels, curve, video noise
+  reduction and color label)
 - **Pro features:** `text_add`, `title_add`, `transition_set`, `punch_in`,
   `keyframes_clear`, `clip_reverse`, `clip_freeze`, `audio_extract`,
   `captions_generate`, `captions_save`, `captions_import`, `beats_detect`
@@ -165,6 +179,10 @@ CapCut preset:
 | , / . | Insert / overwrite from the source monitor |
 | Shift+M / Ctrl+Shift+M | Next / previous marker |
 | Ctrl+Shift+P | Command palette |
+| Ctrl+A / Ctrl+Shift+A | Select all / deselect |
+| Ctrl+D | Duplicate selection |
+| Alt+← / Alt+→ | Nudge selection one frame |
+| ? or F1 | Keyboard shortcut sheet |
 
 ## Project format
 

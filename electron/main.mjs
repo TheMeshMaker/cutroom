@@ -321,12 +321,21 @@ function createWindow() {
     height: 1000,
     minWidth: 1200,
     minHeight: 720,
-    backgroundColor: "#0e0e10",
+    backgroundColor: "#0a0b0e",
     title: "Cutroom",
     show: !SMOKE,
-    webPreferences: { preload: join(here, "preload.cjs"), contextIsolation: true, sandbox: true, backgroundThrottling: !SMOKE },
+    // Smoke runs use offscreen rendering: a hidden (or off-screen) window
+    // stops compositing, so screenshots and CSS animations would go stale.
+    webPreferences: { preload: join(here, "preload.cjs"), contextIsolation: true, sandbox: true, backgroundThrottling: !SMOKE, offscreen: SMOKE },
   });
   win.setMenuBarVisibility(false);
+  if (SMOKE) {
+    win.webContents.setFrameRate(30);
+    setTimeout(() => {
+      console.log("SMOKE_TIMEOUT");
+      app.exit(2);
+    }, 90000).unref?.();
+  }
   const devUrl = process.env.CUTROOM_DEV_URL;
   if (devUrl) win.loadURL(devUrl);
   else win.loadFile(join(here, "..", "dist", "index.html"));
@@ -334,6 +343,12 @@ function createWindow() {
     // Headless self-check: render the UI, optionally drive it, save a screenshot.
     win.webContents.once("did-finish-load", () => {
       setTimeout(async () => {
+        // Wait for the editor (or the projects home) to be on screen.
+        for (let i = 0; i < 80; i++) {
+          if (await win.webContents.executeJavaScript("!!document.querySelector('.timeline, .home, .color-page, .audio-page, .deliver-page')")) break;
+          await new Promise((r) => setTimeout(r, 250));
+        }
+        await new Promise((r) => setTimeout(r, 600));
         const script = flag("smoke-js");
         if (script) {
           try {

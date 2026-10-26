@@ -106,6 +106,10 @@ function TimelineView() {
   const [exact, setExact] = useState(true);
   const [still, setStill] = useState(null);
   const [ratioOpen, setRatioOpen] = useState(false);
+  const [guides, setGuides] = useState(() => localStorage.getItem("cutroom.guides") === "1");
+  const [loop, setLoop] = useState(false);
+  const loopRef = useRef(loop);
+  loopRef.current = loop;
   const isPlaying = useStore(playing);
   const bypass = useStore(gradeBypass);
   const t = useStore(playhead);
@@ -231,14 +235,25 @@ function TimelineView() {
       return;
     }
     resume();
-    const t0 = performance.now();
-    const p0 = playhead.get();
-    const end = range.in != null && range.out != null && range.out > p0 ? range.out : projectDuration(latest.current.project);
+    let t0 = performance.now();
+    let p0 = playhead.get();
+    const hasRange = range.in != null && range.out != null && range.out > range.in;
+    const end = hasRange && range.out > p0 ? range.out : projectDuration(latest.current.project);
+    // Loop plays the In–Out range (or the whole edit) over and over.
+    const loopStart = hasRange && p0 < range.out ? range.in : 0;
     let raf;
     let lastMeter = 0;
     const tick = (time) => {
       const now = p0 + (performance.now() - t0) / 1000;
       if (now >= end) {
+        if (loopRef.current && end - loopStart > 0.1) {
+          t0 = performance.now();
+          p0 = loopStart;
+          playhead.set(loopStart);
+          sync(loopStart, true);
+          raf = requestAnimationFrame(tick);
+          return;
+        }
         playhead.set(end);
         playing.set(false);
         return;
@@ -335,6 +350,13 @@ function TimelineView() {
             <TextLayer project={project} stage={stage} />
           </div>
           {showStill && <img className="exact-still" src={still.url} alt="" />}
+          {guides && (
+            <div className="stage-guides" aria-hidden="true">
+              <div className="thirds" />
+              <div className="safe action" />
+              <div className="safe title" />
+            </div>
+          )}
           {bypass && <div className="stage-badge left">Before (grade off)</div>}
           {!project.clips.length && <div className="stage-empty">Import media and drag it to the timeline</div>}
           {waiting && <div className="stage-badge">Preparing smooth preview…</div>}
@@ -354,6 +376,19 @@ function TimelineView() {
           </button>
         </div>
         <div className="transport-right">
+          <button className={`ghost icon-only ${loop ? "active" : ""}`} onClick={() => setLoop(!loop)} title={loop ? "Loop is on: playback repeats the In–Out range (or the whole edit)" : "Loop playback"}>
+            <Icon name="loop" />
+          </button>
+          <button
+            className={`ghost icon-only ${guides ? "active" : ""}`}
+            onClick={() => {
+              localStorage.setItem("cutroom.guides", guides ? "0" : "1");
+              setGuides(!guides);
+            }}
+            title="Safe areas and rule-of-thirds guides"
+          >
+            <Icon name="grid" />
+          </button>
           <button className={`ghost small ${exact ? "active" : ""}`} onClick={() => setExact(!exact)} title="When paused, show the exact export render of the frame">
             Exact
           </button>

@@ -369,7 +369,7 @@ function cutSpan(x, a, b, ripple) {
 }
 
 const MERGE_KEYS = ["transform", "crop", "adjust", "chroma", "stabilize", "audio", "style", "color"];
-const SET_KEYS = ["volume", "fadeIn", "fadeOut", "muted", "opacity", "flipH", "flipV", "filter", "lut", "effects", "animIn", "animOut", "text", "speed", "videoDenoise", ...MERGE_KEYS];
+const SET_KEYS = ["volume", "fadeIn", "fadeOut", "muted", "opacity", "flipH", "flipV", "filter", "lut", "effects", "animIn", "animOut", "text", "speed", "videoDenoise", "label", ...MERGE_KEYS];
 
 // Set clip properties. Objects listed in MERGE_KEYS merge into the existing
 // value. Changing speed keeps the clip's start.
@@ -405,6 +405,37 @@ export function duplicateClip(p, id, start) {
   const copy = { ...structuredClone(c), id: uid("c"), trackId: track.id, start, transition: null };
   project = edit(project, (n) => n.clips.push(copy));
   return { project, clip: clipById(project, copy.id) };
+}
+
+// Move several clips by the same amount, each on its own track (dragging a
+// selection). Clips that aren't moving must not be in the way.
+export function moveClips(p, ids, delta) {
+  const moving = ids.map((id) => requireClip(p, id));
+  if (!moving.length) return p;
+  const d = Math.max(delta, -Math.min(...moving.map((c) => c.start)));
+  if (Math.abs(d) < EPS) return p;
+  for (const c of moving) {
+    if (overlaps(p, c.trackId, c.start + d, clipEnd(c) + d, ids)) throw new Error("That spot overlaps another clip");
+  }
+  return edit(p, (n) => {
+    for (const id of ids) clipById(n, id).start += d;
+  });
+}
+
+// Copies of several clips with their spacing kept, the earliest at `at`. Each
+// copy stays on its track when there's room, else takes another one.
+export function duplicateClips(p, ids, at) {
+  const list = ids.map((id) => requireClip(p, id)).sort((a, b) => a.start - b.start);
+  if (!list.length) return { project: p, ids: [] };
+  const first = list[0].start;
+  let project = p;
+  const copies = [];
+  for (const c of list) {
+    const r = duplicateClip(project, c.id, Math.max(0, at + c.start - first));
+    project = r.project;
+    copies.push(r.clip.id);
+  }
+  return { project, ids: copies };
 }
 
 // Detach a video clip's sound onto an audio track (and mute the video clip).

@@ -41,6 +41,8 @@ export function createProject({ name = "Untitled", canvas = "1080p" } = {}) {
 
 const TRACK_NAMES = { video: "Video", audio: "Audio", text: "Text" };
 export const ROLES = ["dialogue", "music", "sfx", "ambience"];
+// Clip color labels (Premiere / Resolve style), for organizing the timeline.
+export const LABELS = ["red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
 
 const wheel = (w) => ({ x: clamp(num(w?.x, 0), -1, 1), y: clamp(num(w?.y, 0), -1, 1), l: clamp(num(w?.l, 0), -1, 1) });
 export const DEFAULT_CURVE = [
@@ -162,6 +164,7 @@ function normalizeClip(k, kind, fps) {
     // Primary color wheels: puck x/y (color push) and l (luminance) each.
     color: { lift: wheel(col.lift), gamma: wheel(col.gamma), gain: wheel(col.gain), offset: wheel(col.offset), curve: curve.length >= 2 ? curve : DEFAULT_CURVE },
     videoDenoise: clamp(num(k.videoDenoise, 0), 0, 100),
+    label: LABELS.includes(k.label) ? k.label : null,
     start: Math.max(0, num(k.start, 0)),
     in: inn,
     out,

@@ -79,10 +79,34 @@ function Group({ title, children, right }) {
   );
 }
 
+// Drag a slider's label left/right to change the value (Shift = finer).
+function scrubLabel(e, { value, min, max, step, onChange }) {
+  if (e.button !== 0) return;
+  e.preventDefault();
+  const x0 = e.clientX;
+  const v0 = Number(value);
+  const perPx = (max - min) / 300;
+  document.body.classList.add("scrubbing");
+  const move = (ev) => {
+    const raw = v0 + (ev.clientX - x0) * perPx * (ev.shiftKey ? 0.1 : 1);
+    const snapped = Math.round(raw / step) * step;
+    onChange(Math.min(max, Math.max(min, Number(snapped.toFixed(4)))));
+  };
+  const up = () => {
+    document.body.classList.remove("scrubbing");
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", up);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", up);
+}
+
 function Slider({ label, value, min, max, step = 1, onChange, format = (v) => v, kf, unit = "" }) {
   return (
     <div className="slider-row">
-      <span className="sr-label">{label}</span>
+      <span className="sr-label" title="Drag left or right to adjust (Shift for fine steps) · double-click the slider to reset" onPointerDown={(e) => scrubLabel(e, { value, min, max, step, onChange })}>
+        {label}
+      </span>
       <input type="range" min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} onDoubleClick={() => onChange(min < 0 ? 0 : min)} />
       <NumberBox value={value} step={step} onCommit={onChange} format={format} unit={unit} />
       {kf}

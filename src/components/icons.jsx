@@ -76,6 +76,21 @@ const paths = {
   marker: "M6 3h12v13l-6 5-6-5z",
   template: "M3 5h18v14H3zM6 15h8M6 12h12",
   compare: "M12 3v18M4 6h16v12H4z",
+  chevronRight: "M9 6l6 6-6 6",
+  duplicate: "M8 8h12v12H8zM4 16V4h12M14 11v6M11 14h6",
+  minus: "M5 12h14",
+  rows: "M3 5h18v5H3zM3 14h18v5H3z",
+  rowsTall: "M3 3h18v8H3zM3 13h18v8H3z",
+  rowsCompact: "M3 5h18v3H3zM3 10.5h18v3H3zM3 16h18v3H3z",
+  keyboard: "M3 6h18v12H3zM7 10h.01M11 10h.01M15 10h.01M18 10h.01M7 14h10",
+  grid: "M4 4h16v16H4zM9.33 4v16M14.67 4v16M4 9.33h16M4 14.67h16",
+  loop: "M17 3l3 3-3 3M4 12v-2a4 4 0 014-4h12M7 21l-3-3 3-3M20 12v2a4 4 0 01-4 4H4",
+  palette: "M12 3a9 9 0 100 18c.9 0 1.5-.7 1.5-1.5 0-.4-.2-.8-.4-1.1a1.5 1.5 0 011.1-2.4H16a5 5 0 005-5C21 6.6 17 3 12 3zM7.5 12h.01M9.5 7.5h.01M14.5 7.5h.01",
+  tag: "M3 12V4h8l10 10-8 8zM7.5 7.5h.01",
+  info: "M12 3a9 9 0 100 18 9 9 0 000-18zM12 11v5M12 8h.01",
+  alert: "M12 3l10 18H2zM12 10v5M12 18h.01",
+  close: "M6 6l12 12M18 6L6 18",
+  safe: "M3 5h18v14H3zM6.5 8h11v8h-11z",
 };
 
 export default function Icon({ name, size = 16, className = "" }) {

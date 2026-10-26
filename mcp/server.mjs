@@ -13,7 +13,7 @@ import { importCapcutDraft } from "../core/capcut-import.js";
 import { detectBeats } from "../core/analysis.js";
 import { captionLines, captionsTrack, parseSubtitles, toSrt } from "../core/captions.js";
 import { ADJUST_KEYS, ANIMATIONS, EFFECTS, FILTERS, FONTS, TEXT_STYLES, TITLE_TEMPLATES, TRANSITIONS, VOICE_EFFECTS, byId } from "../core/catalog.js";
-import { clipById, clipEnd, createProject, CANVAS_PRESETS, DEFAULT_CURVE, formatTime, hasMedia, isAdjustment, isText, mediaById, projectDuration, ROLES, sourceAt, trackById, videoLayers } from "../core/model.js";
+import { clipById, clipEnd, createProject, CANVAS_PRESETS, DEFAULT_CURVE, formatTime, hasMedia, isAdjustment, isText, LABELS, mediaById, projectDuration, ROLES, sourceAt, trackById, videoLayers } from "../core/model.js";
 import * as ops from "../core/ops.js";
 import { EXPORT_PRESETS } from "../core/render.js";
 import { timelineWords, wordRanges, wordsFromSegments } from "../core/transcript.js";
@@ -98,6 +98,7 @@ function clipSummary(p, c) {
     ...(c.lut ? { lut: c.lut } : {}),
     ...(colorChanged(c.color) ? { color: c.color } : {}),
     ...(c.videoDenoise ? { videoDenoise: c.videoDenoise } : {}),
+    ...(c.label ? { label: c.label } : {}),
     ...(c.effects.length ? { effects: c.effects } : {}),
     ...(c.chroma.enabled ? { chroma: c.chroma } : {}),
     ...(c.stabilize.enabled ? { stabilize: c.stabilize } : {}),
@@ -250,6 +251,28 @@ tool(
 );
 
 tool(
+  "clips_move",
+  "Move several clips together by `delta` seconds (+ later), each staying on its own track, like dragging a selection. Fails if they would land on other clips.",
+  { ...projectArg, clipIds: z.array(z.string()).min(1), delta: z.number() },
+  editTool((p, { clipIds, delta }) => ops.moveClips(p, clipIds, delta)),
+);
+
+tool(
+  "clips_duplicate",
+  "Copy several clips with their spacing kept. The earliest copy starts at `at` (default: right after the last clip copied). Copies stay on their tracks when there's room.",
+  { ...projectArg, clipIds: z.array(z.string()).min(1), at: z.number().min(0).optional() },
+  editTool((p, { clipIds, at }) => {
+    const end = Math.max(...clipIds.map((id) => {
+      const c = clipById(p, id);
+      if (!c) throw new Error(`No clip ${id}`);
+      return clipEnd(c);
+    }));
+    const r = ops.duplicateClips(p, clipIds, at ?? end);
+    return { project: r.project, note: `Copies: ${r.ids.join(", ")}` };
+  }),
+);
+
+tool(
   "clip_delete",
   "Delete clips. ripple=true closes the gap on their tracks.",
   { ...projectArg, clipIds: z.array(z.string()).min(1), ripple: z.boolean().optional() },
@@ -288,6 +311,7 @@ tool(
       .optional()
       .describe("Primary color wheels (Resolve style): lift = shadows, gamma = midtones, gain = highlights, offset = everything. x/y push the color (x + toward blue, - toward yellow; y + toward red, - toward cyan/green), l brightens or darkens; each -1..1. curve is the master luma curve as [input, output] points 0..1."),
     videoDenoise: z.number().min(0).max(100).optional().describe("Video noise reduction strength (0 = off)."),
+    label: z.enum(LABELS).nullable().optional().describe("Color label for organizing the timeline, or null."),
     effects: z.array(z.object({ id: z.enum(ids(EFFECTS)), intensity: z.number().min(0).max(100).optional() })).optional().describe("Replaces the clip's effect list."),
     chroma: z.object({ enabled: z.boolean().optional(), color: z.string().optional(), similarity: z.number().optional(), blend: z.number().optional() }).optional(),
     stabilize: z.object({ enabled: z.boolean().optional(), strength: z.number().min(0).max(100).optional() }).optional(),

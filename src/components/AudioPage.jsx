@@ -132,7 +132,10 @@ function Strip({ track, apply, soloing }) {
       </select>
       <div className="strip-body">
         <Meter id={track.id} />
-        <input className="fader" type="range" min="0" max="200" value={Math.round(track.volume * 100)} onChange={(e) => set({ volume: Number(e.target.value) / 100 }, "vol")} onDoubleClick={() => set({ volume: 1 })} title="Fader (double-click: 0 dB)" />
+        <div className="fader-wrap" title="Fader (double-click: 0 dB)">
+          <span className="fader-unity" />
+          <input className="fader" type="range" min="0" max="200" value={Math.round(track.volume * 100)} onChange={(e) => set({ volume: Number(e.target.value) / 100 }, "vol")} onDoubleClick={() => set({ volume: 1 })} />
+        </div>
       </div>
       <div className="strip-db">{db(track.volume)} dB</div>
       <input className="pan" type="range" min="-100" max="100" value={Math.round(track.pan * 100)} onChange={(e) => set({ pan: Number(e.target.value) / 100 }, "pan")} onDoubleClick={() => set({ pan: 0 })} title="Pan (double-click: center)" />

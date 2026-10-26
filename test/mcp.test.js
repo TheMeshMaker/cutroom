@@ -153,6 +153,17 @@ test("agent uses the Premiere / Resolve tools", { timeout: 180000 }, async () =>
   t = json(await call("transcript_words", { mediaId: mediaA.id }));
   assert.equal(t.text, "okay go");
 
+  // Selections: label, move together, duplicate.
+  const pair = onMain().slice(-2).map((c) => c.id);
+  s = json(await call("clip_set", { clipId: pair[0], label: "teal" }));
+  assert.equal(clips().find((c) => c.id === pair[0]).label, "teal");
+  await call("settings_set", { magnet: false }); // the magnet would close the gap again
+  const end = s.project.duration;
+  s = json(await call("clips_move", { clipIds: pair, delta: 2 }));
+  assert.ok(Math.abs(s.project.duration - end - 2) < 0.01, `${end} -> ${s.project.duration}`);
+  s = json(await call("clips_duplicate", { clipIds: pair }));
+  assert.match(s.note, /Copies: c_/);
+
   // Subtitles out, and back in on a Captions track.
   const saved = json(await call("captions_save", { outPath: join(OUT, "mcp-captions.srt") }));
   assert.ok(existsSync(saved.path) && saved.lines >= 1, JSON.stringify(saved));

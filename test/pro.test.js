@@ -164,6 +164,37 @@ test("close gaps, speed ramps and title templates", async () => {
   assert.throws(() => ops.addTitle(p, "missing"), /Unknown title template/);
 });
 
+test("moving and duplicating a selection, and clip labels", async () => {
+  let { p, b } = await base(); // main: a 0-3, b 3-6
+  const music = ops.addMedia(p, await probe(MUSIC));
+  p = ops.addClip(music.project, { mediaId: music.media.id, start: 1, in: 0, out: 2 }).project; // audio 1-3
+  const [a, bb] = [...p.clips].filter((c) => c.mediaId !== music.media.id).sort((x, y) => x.start - y.start);
+  const song = p.clips.find((c) => c.mediaId === music.media.id);
+
+  // The second main clip and the song move together; each keeps its track.
+  const moved = ops.moveClips(p, [bb.id, song.id], 1.5);
+  assert.equal(moved.clips.find((c) => c.id === bb.id).start, 4.5);
+  assert.equal(moved.clips.find((c) => c.id === song.id).start, 2.5);
+  assert.equal(moved.clips.find((c) => c.id === song.id).trackId, song.trackId);
+  // Moving left stops at 0 for the earliest clip, and clips in the way block it.
+  assert.equal(ops.moveClips(p, [song.id], -5).clips.find((c) => c.id === song.id).start, 0);
+  assert.equal(ops.moveClips(p, [a.id, song.id], -5), p, "a group already at 0 stays put");
+  assert.throws(() => ops.moveClips(p, [bb.id], -1), /overlaps/);
+
+  // Duplicates keep their spacing and land after the originals.
+  const dup = ops.duplicateClips(p, [a.id, song.id], 6);
+  assert.equal(dup.ids.length, 2);
+  const copies = dup.project.clips.filter((c) => dup.ids.includes(c.id)).sort((x, y) => x.start - y.start);
+  assert.deepEqual(copies.map((c) => c.start), [6, 7]);
+  assert.equal(copies[0].trackId, a.trackId);
+
+  // Labels: one of the known colors, or none.
+  const labeled = ops.setClip(p, a.id, { label: "purple" });
+  assert.equal(labeled.clips.find((c) => c.id === a.id).label, "purple");
+  assert.equal(ops.setClip(labeled, a.id, { label: "plaid" }).clips.find((c) => c.id === a.id).label, null);
+  assert.equal(b.kind, "video");
+});
+
 test("cutting a range never leaves a sub-frame sliver that overlaps the next clip", () => {
   let p = createProject({ canvas: "720p" });
   p = ops.addTextTrack(p, [{ start: 0, end: 1.508, text: "title" }, { start: 1.508, end: 3, text: "next" }]).project;

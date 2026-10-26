@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { TEXT_STYLES, TITLE_TEMPLATES, byId } from "../core/catalog.js";
 import { captionLines } from "../core/captions.js";
-import { clipById, clipEnd, clipsAt, hasMedia, isText, mainTrack, mediaById, projectDuration, sourceAt, trackById, videoLayers } from "../core/model.js";
+import { clipById, clipEnd, clipsAt, hasMedia, isText, LABELS, mainTrack, mediaById, projectDuration, sourceAt, trackById, videoLayers } from "../core/model.js";
 import * as ops from "../core/ops.js";
 import { isFiller, wordRanges, wordsFromSegments } from "../core/transcript.js";
 import { autoColor, matchColor } from "./colorTools.js";
@@ -14,6 +14,9 @@ import ExportDialog from "./components/ExportDialog.jsx";
 import Library from "./components/Library.jsx";
 import Player from "./components/Player.jsx";
 import ProjectsHome from "./components/ProjectsHome.jsx";
+import ShortcutsDialog from "./components/ShortcutsDialog.jsx";
+import Toast from "./components/Toast.jsx";
+import Tooltips from "./components/Tooltips.jsx";
 import Properties from "./components/Properties.jsx";
 import Splitter from "./components/Splitter.jsx";
 import Timeline from "./components/Timeline.jsx";
@@ -22,6 +25,7 @@ import { EditorContext, EMPTY_SELECTION } from "./editor.js";
 import { actionFor, KEYMAPS, shortcutFor } from "./keymaps.js";
 import { PUNCH_DEFAULTS } from "./presets.js";
 import { api, gradeBypass, playhead, playing, sourceControl } from "./state.js";
+import { ACCENTS } from "./theme.js";
 
 const load = (key, fallback) => {
   try {
@@ -62,6 +66,8 @@ export default function App() {
   const [source, setSource] = useState(null); // source monitor: { mediaId, in, out, t }
   const [viewer, setViewer] = useState("timeline");
   const [backupsOpen, setBackupsOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [accent, setAccentState] = useState(() => load("cutroom.accent", "teal"));
   const gradeClipboard = useRef(null);
   const [keymap, setKeymapState] = useState(() => load("cutroom.keymap", "capcut"));
   const [layout, setLayoutState] = useState(() => ({ lib: 380, props: 330, timeline: 0.42, ...load("cutroom.layout", {}) }));
@@ -75,6 +81,13 @@ export default function App() {
     setKeymapState(k);
     save("cutroom.keymap", k);
   };
+  const setAccent = (a) => {
+    setAccentState(a);
+    save("cutroom.accent", a);
+  };
+  useEffect(() => {
+    document.documentElement.dataset.accent = accent;
+  }, [accent]);
   const setLayout = (patch) =>
     setLayoutState((l) => {
       const next = { ...l, ...patch };
@@ -82,10 +95,11 @@ export default function App() {
       return next;
     });
 
-  const notify = useCallback((text, kind = "info") => setToast({ text, kind, id: Date.now() }), []);
+  // A toast; `{ undo: true }` adds an Undo button for destructive edits.
+  const notify = useCallback((text, kind = "info", opts = {}) => setToast({ text, kind, id: Date.now(), undo: !!opts.undo }), []);
   useEffect(() => {
     if (!toast) return;
-    const t = setTimeout(() => setToast(null), toast.kind === "error" ? 5000 : 3000);
+    const t = setTimeout(() => setToast(null), toast.kind === "error" ? 5000 : toast.undo ? 5000 : 3000);
     return () => clearTimeout(t);
   }, [toast]);
 
@@ -318,9 +332,62 @@ export default function App() {
           gradeBypass.set(gradeBypass.get() === c.id ? null : c.id);
         }),
       closeGaps: () => {
-        if (apply((x) => ops.closeGaps(x))) notify("Closed all gaps");
+        if (apply((x) => ops.closeGaps(x))) notify("Closed all gaps", "info", { undo: true });
         else notify("No gaps to close");
       },
+      selectAll: () => {
+        const x = p();
+        setSelection({ ...EMPTY_SELECTION, clips: x.clips.filter((c) => !trackById(x, c.trackId)?.locked).map((c) => c.id) });
+      },
+      deselect: () => setSelection(EMPTY_SELECTION),
+      selectTrack: (trackId) => setSelection({ ...EMPTY_SELECTION, clips: p().clips.filter((c) => c.trackId === trackId).map((c) => c.id) }),
+      // Premiere's "track select forward": everything that ends after `time`.
+      selectForward: (time = t()) => {
+        const x = p();
+        setSelection({ ...EMPTY_SELECTION, clips: x.clips.filter((c) => clipEnd(c) > time + 1e-6 && !trackById(x, c.trackId)?.locked).map((c) => c.id) });
+      },
+      duplicate: () => {
+        const ids = targetClips(["video", "audio", "text"]).map((c) => c.id);
+        if (!ids.length) return notify("Select clips to duplicate", "error");
+        let copies = [];
+        const ok = apply((x) => {
+          const end = Math.max(...ids.map((id) => clipEnd(clipById(x, id))));
+          const r = ops.duplicateClips(x, ids, end);
+          copies = r.ids;
+          return r.project;
+        });
+        if (ok) setSelection({ ...EMPTY_SELECTION, clips: copies });
+      },
+      nudge: (d) => {
+        if (!selection.clips.length) return a[d < 0 ? "prevFrame" : "nextFrame"]();
+        apply((x) => ops.moveClips(x, selection.clips, d), { coalesce: "nudge" });
+      },
+      nudgeLeft: () => a.nudge(-1 / p().canvas.fps),
+      nudgeRight: () => a.nudge(1 / p().canvas.fps),
+      setLabel: (label) => {
+        const ids = targetClips(["video", "audio", "text"]).map((c) => c.id);
+        if (ids.length) apply((x) => ids.reduce((acc, id) => ops.setClip(acc, id, { label }), x));
+      },
+      toggleClipMute: () => {
+        const list = targetClips(["video", "audio"]).filter(hasMedia);
+        if (!list.length) return;
+        const muted = !list[0].muted;
+        apply((x) => list.reduce((acc, c) => ops.setClip(acc, c.id, { muted }), x));
+      },
+      setSpeed: (speed) => {
+        const list = targetClips(["video", "audio"]).filter(hasMedia);
+        if (list.length) apply((x) => list.reduce((acc, c) => ops.setClip(acc, c.id, { speed }), x));
+      },
+      addTrack: (kind) => {
+        if (apply((x) => ops.addTrack(x, kind).project)) notify(`Added a ${kind} track`);
+      },
+      removeTrack: (id) => {
+        const x = p();
+        const n = x.clips.filter((c) => c.trackId === id).length;
+        if (apply((y) => ops.removeTrack(y, id))) notify(n ? `Deleted the track and its ${n} clip${n === 1 ? "" : "s"}` : "Deleted the track", "info", { undo: true });
+      },
+      zoomSelection: () => window.dispatchEvent(new CustomEvent("timeline-zoom-selection")),
+      shortcuts: () => setShortcutsOpen(true),
       speedRamp: (preset) => withClip((c) => apply((x) => ops.speedRamp(x, c.id, preset)), ["video", "audio"]),
       addTitle: (templateId) =>
         apply((x) => {
@@ -383,9 +450,11 @@ export default function App() {
       splitAll: () => apply((x) => ops.splitAt(x, t())),
       splitClipAt: (id, time) => apply((x) => ops.splitClip(x, id, time).project),
       remove: (ripple = false) => {
+        const n = selection.clips.length;
         if (selection.transition) apply((x) => ops.setTransition(x, selection.transition, null));
-        else if (selection.clips.length) apply((x) => ops.deleteClips(x, selection.clips, { ripple }));
-        else if (selection.bleep) apply((x) => ops.removeBleep(x, selection.bleep));
+        else if (n) {
+          if (apply((x) => ops.deleteClips(x, selection.clips, { ripple }))) notify(`${ripple ? "Ripple deleted" : "Deleted"} ${n} clip${n === 1 ? "" : "s"}`, "info", { undo: true });
+        } else if (selection.bleep) apply((x) => ops.removeBleep(x, selection.bleep));
         else if (selection.markers.length) apply((x) => ops.removeMarkers(x, selection.markers));
         setSelection(EMPTY_SELECTION);
       },
@@ -418,6 +487,7 @@ export default function App() {
         setSelection(EMPTY_SELECTION);
         setTool("select");
         setPaletteOpen(false);
+        setShortcutsOpen(false);
       },
       selectAtPlayhead: () => {
         const [c] = targetClips(["video", "audio", "text"]);
@@ -521,11 +591,23 @@ export default function App() {
         if (apply((y) => ops.setTransition(y, target.id, { type, duration: target.transition?.duration ?? 0.5 }))) setSelection({ ...EMPTY_SELECTION, transition: target.id });
       },
       copy: () => {
-        const [c] = targetClips(["video", "audio", "text"]);
-        if (c) clipboard.current = c.id;
+        const ids = targetClips(["video", "audio", "text"]).map((c) => c.id);
+        if (!ids.length) return;
+        clipboard.current = ids;
+        notify(`Copied ${ids.length} clip${ids.length === 1 ? "" : "s"}`);
       },
-      paste: () => {
-        if (clipboard.current) apply((x) => (clipById(x, clipboard.current) ? ops.duplicateClip(x, clipboard.current, t()).project : x));
+      canPaste: () => !!clipboard.current?.some((id) => clipById(p(), id)),
+      // Paste keeps the copied clips' spacing, starting at the playhead.
+      paste: (at = t()) => {
+        const ids = (clipboard.current ?? []).filter((id) => clipById(p(), id));
+        if (!ids.length) return;
+        let copies = [];
+        const ok = apply((x) => {
+          const r = ops.duplicateClips(x, ids, at);
+          copies = r.ids;
+          return r.project;
+        });
+        if (ok) setSelection({ ...EMPTY_SELECTION, clips: copies });
       },
       transcribe: async ({ mediaId, language }) => {
         const m = mediaById(p(), mediaId);
@@ -591,6 +673,7 @@ export default function App() {
       },
       setPage,
     };
+    a.importMedia = a.import;
     return a;
   }, [apply, notify, range, selection, targetClips, undo, redo, proxies, source, viewer]);
 
@@ -605,15 +688,20 @@ export default function App() {
         ["copyGrade", "Copy grade"], ["pasteGrade", "Paste grade on selected clips"], ["toggleBypass", "Before / after (bypass grade)"], ["closeGaps", "Close all gaps"],
         ["sourceInsert", "Source monitor: insert at playhead"], ["sourceOverwrite", "Source monitor: overwrite at playhead"], ["nextMarker", "Go to next marker"], ["prevMarker", "Go to previous marker"],
         ["restoreBackups", "Restore an earlier version…"],
+        ["selectAll", "Select all clips"], ["deselect", "Deselect all"], ["selectForward", "Select everything after the playhead"], ["duplicate", "Duplicate selection"], ["copy", "Copy clips"], ["paste", "Paste clips at playhead"],
+        ["nudgeLeft", "Nudge selection one frame left"], ["nudgeRight", "Nudge selection one frame right"], ["toggleClipMute", "Mute / unmute clip"], ["zoomSelection", "Zoom timeline to selection"],
         ["import", "Import media"], ["export", "Export…"], ["undo", "Undo"], ["redo", "Redo"], ["snap", "Toggle snapping"], ["fit", "Fit timeline"], ["zoomIn", "Zoom timeline in"], ["zoomOut", "Zoom timeline out"],
-        ["goHome", "Go to Projects"],
+        ["shortcuts", "Show keyboard shortcuts"], ["goHome", "Go to Projects"],
       ].map(([id, label]) => ({ id, label, shortcut: shortcutFor(id, keymap), run: () => actions[id]?.() })).concat(
+        ["video", "audio", "text"].map((kd) => ({ id: `track-${kd}`, label: `Add ${kd} track`, shortcut: "", run: () => actions.addTrack(kd) })),
+        LABELS.map((l) => ({ id: `label-${l}`, label: `Label clip: ${l}`, shortcut: "", run: () => actions.setLabel(l) })),
+        Object.entries(ACCENTS).map(([k, v]) => ({ id: `accent-${k}`, label: `Theme color: ${v}`, shortcut: k === accent ? "current" : "", run: () => setAccent(k) })),
         Object.entries(ops.SPEED_RAMPS).map(([k, v]) => ({ id: `ramp-${k}`, label: `Speed ramp: ${v.label}`, shortcut: "", run: () => actions.speedRamp(k) })),
         TITLE_TEMPLATES.map((tpl) => ({ id: `title-${tpl.id}`, label: `Add title: ${tpl.name}`, shortcut: "", run: () => actions.addTitle(tpl.id) })),
         ["edit", "color", "audio", "deliver"].map((pg) => ({ id: `page-${pg}`, label: `Open ${pg[0].toUpperCase() + pg.slice(1)} page`, shortcut: "", run: () => setPage(pg) })),
         Object.entries(KEYMAPS).map(([k, v]) => ({ id: `keymap-${k}`, label: `Keyboard shortcuts: ${v.label}`, shortcut: k === keymap ? "current" : "", run: () => setKeymap(k) })),
       ),
-    [actions, keymap],
+    [actions, keymap, accent],
   );
 
   useEffect(() => {
@@ -664,6 +752,9 @@ export default function App() {
         setKeymap,
         openExport: () => setExportOpen(true),
         openPalette: () => setPaletteOpen(true),
+        openShortcuts: () => setShortcutsOpen(true),
+        accent,
+        setAccent,
         openDoc,
         targetClips,
         source,
@@ -671,7 +762,7 @@ export default function App() {
         viewer,
         setViewer,
       },
-    [project, doc, apply, undo, redo, selection, range, proxies, waves, strips, jobsState, notify, tool, magnet, snap, libraryTab, saveState, actions, page, keymap, openDoc, targetClips, source, viewer],
+    [project, doc, apply, undo, redo, selection, range, proxies, waves, strips, jobsState, notify, tool, magnet, snap, libraryTab, saveState, actions, page, keymap, openDoc, targetClips, source, viewer, accent],
   );
 
   if (!booted) return <div className="boot" />;
@@ -679,12 +770,13 @@ export default function App() {
     return (
       <>
         <ProjectsHome current={doc?.path} onOpen={openDoc} onBack={doc ? () => setHome(false) : null} notify={notify} />
-        {toast && <div className={`toast ${toast.kind}`}>{toast.text}</div>}
+        {toast && <Toast key={toast.id} toast={toast} onClose={() => setToast(null)} />}
+        <Tooltips />
       </>
     );
   }
 
-  const style = { "--lib-w": `${layout.lib}px`, "--props-w": `${layout.props}px`, gridTemplateRows: `44px minmax(260px, ${1 - layout.timeline}fr) 6px minmax(180px, ${layout.timeline}fr)` };
+  const style = { "--lib-w": `${layout.lib}px`, "--props-w": `${layout.props}px`, gridTemplateRows: `48px minmax(260px, ${1 - layout.timeline}fr) 6px minmax(180px, ${layout.timeline}fr)` };
 
   return (
     <EditorContext.Provider value={editor}>
@@ -708,8 +800,10 @@ export default function App() {
         {page === "deliver" && <DeliverPage />}
         {exportOpen && <ExportDialog onClose={() => setExportOpen(false)} />}
         {paletteOpen && <CommandPalette commands={commands} onClose={() => setPaletteOpen(false)} />}
+        {shortcutsOpen && <ShortcutsDialog keymap={keymap} onClose={() => setShortcutsOpen(false)} />}
         {backupsOpen && <BackupsDialog path={doc.path} onClose={() => setBackupsOpen(false)} onRestored={(opened) => (setBackupsOpen(false), openDoc(opened), notify("Restored the earlier version (the current one was backed up first)"))} notify={notify} />}
-        {toast && <div className={`toast ${toast.kind}`}>{toast.text}</div>}
+        {toast && <Toast key={toast.id} toast={toast} onClose={() => setToast(null)} onUndo={() => (undo(), setToast(null))} />}
+        <Tooltips />
       </div>
     </EditorContext.Provider>
   );

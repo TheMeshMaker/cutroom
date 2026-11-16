@@ -1,0 +1,29 @@
+[package]
+name = "cutroom"
+version = "0.5.0"
+description = "Cutroom video editor (native)"
+authors = ["TheMeshMaker"]
+license = "MIT"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["rt"] }
+image = "0.25"
+iced = { version = "0.14", features = ["canvas", "image", "tokio", "advanced", "advanced-shaping"] }
+rquickjs = { version = "0.14", features = ["loader"] }
+rfd = "0.18"
+cpal = "0.18"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha1 = "0.10"
+sys-locale = "0.3"
+
+[profile.release]
+lto = "thin"
+strip = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3

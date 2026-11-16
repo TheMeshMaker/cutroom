@@ -40,6 +40,7 @@ export function createProject({ name = "Untitled", canvas = "1080p" } = {}) {
 }
 
 const TRACK_NAMES = { video: "Video", audio: "Audio", text: "Text" };
+export const MASKS = ["circle", "rectangle", "linear", "mirror"];
 export const ROLES = ["dialogue", "music", "sfx", "ambience"];
 // Clip color labels (Premiere / Resolve style), for organizing the timeline.
 export const LABELS = ["red", "orange", "yellow", "green", "teal", "blue", "purple", "pink"];
@@ -66,7 +67,8 @@ export function normalizeProject(input) {
   // Editor settings that change how edits behave, saved with the project so
   // the app and the MCP server agree. magnet: the main track never has gaps.
   // loudness: master loudness target in LUFS applied on export (null = off).
-  p.settings = { magnet: p.settings?.magnet !== false, loudness: Number.isFinite(p.settings?.loudness) ? clamp(p.settings.loudness, -30, -8) : null };
+  // background: what fills the canvas around footage that doesn't cover it ("blur", "#rrggbb" or black).
+  p.settings = { magnet: p.settings?.magnet !== false, loudness: Number.isFinite(p.settings?.loudness) ? clamp(p.settings.loudness, -30, -8) : null, background: p.settings?.background === "blur" || /^#[0-9a-f]{6}$/i.test(p.settings?.background ?? "") ? p.settings.background : null };
   p.media = (Array.isArray(p.media) ? p.media : [])
     .filter((m) => m && typeof m.path === "string")
     .map((m) => ({
@@ -81,6 +83,8 @@ export function normalizeProject(input) {
       hasAudio: m.hasAudio !== false,
       kind: m.kind ?? (m.hasVideo === false ? "audio" : "video"),
       ...(m.derivedFrom ? { derivedFrom: m.derivedFrom } : {}),
+      // Names of the audio tracks in a multi-track recording (OBS).
+      ...(Array.isArray(m.audioTracks) && m.audioTracks.length > 1 ? { audioTracks: m.audioTracks.map(String) } : {}),
     }));
   p.tracks = (Array.isArray(p.tracks) ? p.tracks : [])
     .filter((t) => t && TRACK_NAMES[t.kind])
@@ -183,6 +187,8 @@ function normalizeClip(k, kind, fps) {
     lut: typeof k.lut === "string" && k.lut ? k.lut : null,
     effects: (Array.isArray(k.effects) ? k.effects : []).filter((e) => e && byId(EFFECTS, e.id)).map((e) => ({ id: e.id, intensity: clamp(num(e.intensity, 60), 0, 100) })),
     chroma: { enabled: !!chroma.enabled, color: /^#[0-9a-f]{6}$/i.test(chroma.color ?? "") ? chroma.color : "#00ff00", similarity: clamp(num(chroma.similarity, 0.18), 0.01, 1), blend: clamp(num(chroma.blend, 0.08), 0, 1) },
+    // Shape mask (position/size relative to the clip, feather 0..1).
+    mask: MASKS.includes(k.mask?.type) ? { type: k.mask.type, x: clamp(num(k.mask.x, 0), -1, 1), y: clamp(num(k.mask.y, 0), -1, 1), w: clamp(num(k.mask.w, 0.6), 0.02, 2), h: clamp(num(k.mask.h, 0.6), 0.02, 2), feather: clamp(num(k.mask.feather, 0.1), 0, 1), invert: !!k.mask.invert } : null,
     stabilize: { enabled: !!stab.enabled, strength: clamp(num(stab.strength, 50), 0, 100) },
     animIn: animOf(k.animIn),
     animOut: animOf(k.animOut),

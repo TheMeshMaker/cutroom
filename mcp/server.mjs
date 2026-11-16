@@ -10,20 +10,22 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { importCapcutDraft } from "../core/capcut-import.js";
-import { detectBeats } from "../core/analysis.js";
-import { captionLines, captionsTrack, parseSubtitles, toSrt } from "../core/captions.js";
+import { captionsTrack, toSrt } from "../core/captions.js";
 import { ADJUST_KEYS, ANIMATIONS, EFFECTS, FILTERS, FONTS, TEXT_STYLES, TITLE_TEMPLATES, TRANSITIONS, VOICE_EFFECTS, byId } from "../core/catalog.js";
-import { clipById, clipEnd, createProject, CANVAS_PRESETS, DEFAULT_CURVE, formatTime, hasMedia, isAdjustment, isText, LABELS, mediaById, projectDuration, ROLES, sourceAt, trackById, videoLayers } from "../core/model.js";
+import { clipById, clipEnd, createProject, CANVAS_PRESETS, DEFAULT_CURVE, formatTime, hasMedia, isAdjustment, isText, LABELS, mediaById, projectDuration, ROLES, trackById, videoLayers } from "../core/model.js";
 import * as ops from "../core/ops.js";
 import { EXPORT_PRESETS } from "../core/render.js";
 import { timelineWords, wordRanges, wordsFromSegments } from "../core/transcript.js";
-import { transcribe } from "../node/captions.js";
+import { python, transcribe } from "../node/captions.js";
+import { nodeHost } from "../node/host.js";
+import { createFlows } from "../engine/flows.js";
 import { renderFrame, renderProject } from "../node/exporter.js";
-import { detectScenes, detectSilence, extractFrame, FFMPEG, makeReversed, probe, run, waveform } from "../node/media.js";
+import { detectScenes, detectSilence, FFMPEG, media, probe, run } from "../node/media.js";
 import { listBackups, loadProject, PROJECT_EXT, readState, restoreBackup, saveProject, writeState } from "../node/store.js";
 
 const CAPCUT_DRAFTS = join(process.env.LOCALAPPDATA ?? homedir(), "CapCut", "User Data", "Projects", "com.lveditor.draft");
-const server = new McpServer({ name: "cutroom", version: "0.4.0" });
+const server = new McpServer({ name: "cutroom", version: "0.5.0" });
+const flows = createFlows(nodeHost, media, python, { renderFrame });
 
 let currentPath = process.env.CUTROOM_PROJECT ?? null;
 
@@ -213,12 +215,15 @@ tool(
   { ...projectArg, paths: z.array(z.string()).min(1), addToTimeline: z.boolean().optional() },
   editTool(async (p, { paths, addToTimeline }) => {
     let next = p;
+    let firstVideo = null;
     for (const file of paths) {
       const r = ops.addMedia(next, await probe(file));
       next = r.project;
       if (addToTimeline) next = ops.addClip(next, { mediaId: r.media.id }).project;
+      if (r.media.hasVideo && r.media.kind !== "image") firstVideo ??= r.media.id;
     }
-    return next;
+    // Like the app: the first video of an empty project sets size and frame rate.
+    return addToTimeline && !p.clips.length && firstVideo ? ops.matchCanvas(next, firstVideo) : next;
   }),
 );
 
@@ -373,26 +378,14 @@ tool(
   "clip_reverse",
   "Play a clip backwards (renders a reversed copy of its source range once, then points the clip at it).",
   { ...projectArg, clipId: z.string() },
-  editTool(async (p, { clipId }) => {
-    const c = clipById(p, clipId);
-    if (!c || isText(c)) throw new Error("Pick a video or audio clip");
-    const info = await makeReversed(mediaById(p, c.mediaId), c.in, c.out);
-    const r = ops.addMedia(p, info);
-    return ops.replaceClipMedia(r.project, clipId, r.media.id, { in: 0, out: info.duration, reverseKeyframes: true });
-  }),
+  editTool((p, { clipId }) => flows.reverse(p, clipId)),
 );
 
 tool(
   "clip_freeze",
   "Freeze frame: split the clip at a timeline time and hold that frame for `duration` seconds (later clips on the track move right).",
   { ...projectArg, clipId: z.string(), time: z.number(), duration: z.number().positive().optional() },
-  editTool(async (p, { clipId, time, duration = 3 }) => {
-    const c = clipById(p, clipId);
-    if (!c || isText(c)) throw new Error("Pick a video clip");
-    const still = await extractFrame(mediaById(p, c.mediaId), sourceAt(c, time));
-    const r = ops.addMedia(p, still);
-    return ops.insertFreeze(r.project, clipId, time, r.media.id, duration);
-  }),
+  editTool((p, { clipId, time, duration = 3 }) => flows.freeze(p, clipId, time, { duration })),
 );
 
 tool(
@@ -406,16 +399,7 @@ tool(
   "captions_generate",
   "Auto captions: transcribe a media item's speech locally (faster-whisper large-v3, GPU) and add caption text clips on a new Captions track, following the edit (cut-out words are dropped).",
   { ...projectArg, mediaId: z.string().optional().describe("Defaults to the first audio-only media on the timeline, else the first with audio."), language: z.string().optional().describe("ISO code like en or ar; default auto-detect."), styleId: z.enum(ids(TEXT_STYLES)).optional(), maxChars: z.number().int().min(8).max(80).optional() },
-  editTool(async (p, { mediaId, language = "auto", styleId = "subtitle", maxChars = 32 }) => {
-    const used = new Set(p.clips.map((c) => c.mediaId));
-    const audible = p.media.filter((m) => used.has(m.id) && m.hasAudio);
-    const media = mediaId ? mediaById(p, mediaId) : (audible.find((m) => !m.hasVideo) ?? audible[0]);
-    if (!media) throw new Error("No media with audio on the timeline");
-    const result = await transcribe(media, { language });
-    const lines = captionLines(p, media.id, result.segments, { maxChars });
-    if (!lines.length) throw new Error("No speech found");
-    return { project: ops.addTextTrack(p, lines, { name: "Captions", style: byId(TEXT_STYLES, styleId).style }).project, note: `${lines.length} captions, language ${result.language}` };
-  }),
+  editTool((p, { mediaId, language = "auto", styleId = "subtitle", maxChars = 32 }) => flows.captions(p, { mediaId, language, styleId, maxChars })),
 );
 
 tool(
@@ -435,29 +419,14 @@ tool(
   "captions_import",
   "Import subtitles from an .srt or .vtt file as caption text clips on a new Captions track (timings are timeline seconds).",
   { ...projectArg, path: z.string(), styleId: z.enum(ids(TEXT_STYLES)).optional(), offset: z.number().optional().describe("Shift every line by this many seconds.") },
-  editTool((p, { path, styleId = "subtitle", offset = 0 }) => {
-    const lines = parseSubtitles(readFileSync(path, "utf8"))
-      .map((l) => ({ ...l, start: l.start + offset, end: l.end + offset }))
-      .filter((l) => l.end > 0)
-      .map((l) => ({ ...l, start: Math.max(0, l.start) }));
-    if (!lines.length) throw new Error(`No subtitles found in ${path}`);
-    return { project: ops.addTextTrack(p, lines, { name: "Captions", style: byId(TEXT_STYLES, styleId).style }).project, note: `${lines.length} captions` };
-  }),
+  editTool((p, { path, styleId = "subtitle", offset = 0 }) => flows.importSubtitles(p, path, { styleId, offset })),
 );
 
 tool(
   "beats_detect",
   "Mark the beats of a music clip on the timeline (markers labeled beat), for cutting to the rhythm.",
   { ...projectArg, clipId: z.string(), sensitivity: z.number().min(0).max(1).optional() },
-  editTool(async (p, { clipId, sensitivity = 0.5 }) => {
-    const c = clipById(p, clipId);
-    if (!c || isText(c)) throw new Error("Pick a clip with audio");
-    const wave = await waveform(mediaById(p, c.mediaId));
-    const times = detectBeats(wave, { sensitivity })
-      .filter((t) => t >= c.in && t < c.out)
-      .map((t) => c.start + (t - c.in) / c.speed);
-    return { project: ops.addMarkers(p, times.map((time) => ({ time, label: "beat", color: "beat" }))), note: `${times.length} beats` };
-  }),
+  editTool((p, { clipId, sensitivity = 0.5 }) => flows.beats(p, clipId, { sensitivity })),
 );
 
 tool(

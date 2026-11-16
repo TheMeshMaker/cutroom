@@ -9,8 +9,8 @@ import { buildRenderPlan, colorFilters, wheelRgb } from "../core/render.js";
 import { parseSubtitles, toSrt } from "../core/captions.js";
 import { isFiller, timelineWords, wordRanges } from "../core/transcript.js";
 import { renderFrame, renderProject } from "../node/exporter.js";
-import { detectScenes, probe } from "../node/media.js";
-import { A, B, ensureMedia, MUSIC, OUT } from "./fixtures.js";
+import { detectScenes, probe, splitAudioTracks } from "../node/media.js";
+import { A, B, ensureMedia, MUSIC, OBS, OUT } from "./fixtures.js";
 
 before(ensureMedia);
 
@@ -215,4 +215,25 @@ test("subtitles: .srt out, .srt/.vtt in", () => {
   const vtt = "WEBVTT\r\n\r\nNOTE made elsewhere\r\n\r\n00:01.000 --> 00:04.000 align:start\r\n<i>Overlapping</i> line\r\n\r\n00:03.000 --> 00:05.500\r\nNext\r\n";
   assert.deepEqual(parseSubtitles(vtt), [{ start: 1, end: 3, text: "Overlapping line" }, { start: 3, end: 5.5, text: "Next" }]);
   assert.throws(() => toSrt(createProject()), /No captions/);
+});
+
+test("OBS recordings: each audio track on its own track, cuts kept; canvas matches the footage", { timeout: 120000 }, async () => {
+  const info = await probe(OBS);
+  assert.deepEqual(info.audioTracks, ["Game", "Mic"]);
+  let p = createProject({ canvas: "1080p" });
+  const r = ops.addMedia(p, info);
+  p = ops.addClip(r.project, { mediaId: r.media.id }).project;
+  p = ops.matchCanvas(p, r.media.id);
+  assert.deepEqual([p.canvas.width, p.canvas.height, p.canvas.fps], [640, 360, 60]);
+  p = ops.splitClip(p, p.clips[0].id, 1.5).project; // an edit made before splitting
+
+  const tracks = await splitAudioTracks(r.media);
+  assert.deepEqual(tracks.map((t) => [t.role, t.hasVideo, Math.round(t.duration)]), [["sfx", false, 3], ["dialogue", false, 3]]);
+  p = ops.addAudioLayers(p, r.media.id, tracks.map((t) => ({ info: t, name: t.name.split(" (")[0], role: t.role })));
+  const audio = p.tracks.filter((t) => t.kind === "audio").slice(-2); // new projects also have an empty "Audio 1"
+  assert.deepEqual(audio.map((t) => [t.name, t.role]), [["Game", "sfx"], ["Mic", "dialogue"]]);
+  for (const t of audio) assert.deepEqual(p.clips.filter((c) => c.trackId === t.id).map((c) => [c.start, c.in]).sort(), [[0, 0], [1.5, 1.5]]);
+  assert.ok(p.clips.filter((c) => c.mediaId === r.media.id).every((c) => c.muted), "the original sound is muted");
+  assert.match(buildRenderPlan(p, { tmpDir: OUT, video: false }).graph, /amix/);
+  assert.throws(() => ops.addAudioLayers(p, "nope", []), /isn't on the timeline/);
 });

@@ -157,7 +157,9 @@ export function buildRenderPlan(project, opts = {}) {
   let outH = H;
   if (withVideo) {
     let comp = next("base");
-    chains.push(`color=c=black:s=${W}x${H}:r=${f(fps)}:d=${f(total)},format=yuv420p,setsar=1[${comp}]`);
+    const bg = project.settings?.background;
+    chains.push(`color=c=${bg && bg !== "blur" ? hexColor(bg).slice(0, 8) : "black"}:s=${W}x${H}:r=${f(fps)}:d=${f(total)},format=yuv420p,setsar=1[${comp}]`);
+    const mainId = videoLayers(project)[0]?.id;
     for (const track of videoLayers(project).filter((t) => !t.hidden)) {
       // Adjustment layers on this track grade everything composited so far.
       const adjustments = project.clips
@@ -182,7 +184,16 @@ export function buildRenderPlan(project, opts = {}) {
       const piece = (seg) => {
         const l = next("v");
         const full = seg.pre + seg.dur + seg.post;
-        chains.push(`[${inputFor(seg)}:v]${videoFilters(seg, { W, H, fps, next })},tpad=stop_mode=clone:stop_duration=2,trim=duration=${f(full)},setpts=PTS-STARTPTS,format=yuva420p[${l}]`);
+        const tail = `tpad=stop_mode=clone:stop_duration=2,trim=duration=${f(full)},setpts=PTS-STARTPTS,format=yuva420p`;
+        if (bg === "blur" && track.id === mainId) {
+          // Canvas blur: the same footage, filled and blurred, behind the clip.
+          const [a, b, back, front] = [next("s"), next("s"), next("bg"), next("fg")];
+          const speed = Math.abs(seg.clip.speed - 1) > EPS ? `setpts=(PTS-STARTPTS)/${f(seg.clip.speed)}` : "setpts=PTS-STARTPTS";
+          chains.push(`[${inputFor(seg)}:v]split[${a}][${b}]`);
+          chains.push(`[${b}]${speed},fps=${f(fps)},scale=${W}:${H}:force_original_aspect_ratio=increase,crop=${W}:${H},gblur=sigma=40,eq=brightness=-0.08,format=yuva420p,setsar=1[${back}]`);
+          chains.push(`[${a}]${videoFilters(seg, { W, H, fps, next })}[${front}]`);
+          chains.push(`[${back}][${front}]overlay=0:0:format=auto,${tail}[${l}]`);
+        } else chains.push(`[${inputFor(seg)}:v]${videoFilters(seg, { W, H, fps, next })},${tail}[${l}]`);
         return l;
       };
       const join = (tr, runLen) => `xfade=transition=${tr.xfade}:duration=${f(tr.d)}:offset=${f(runLen - tr.d)},format=yuva420p`;
@@ -340,10 +351,11 @@ function videoFilters(seg, { W, H, fps, next }) {
   }
   if (c.flipH) out.push("hflip");
   if (c.flipV) out.push("vflip");
-  out.push(`scale=${W}:${H}:force_original_aspect_ratio=decrease:flags=bicubic`);
+  out.push(`scale=${W}:${H}:force_original_aspect_ratio=decrease:flags=lanczos`);
   out.push(...clipLookFilters(c, { next }));
   out.push("format=yuva420p");
   if (c.chroma.enabled) out.push(`chromakey=color=${hexColor(c.chroma.color).slice(0, 8)}:similarity=${f(c.chroma.similarity)}:blend=${f(c.chroma.blend)}`);
+  if (c.mask) out.push(maskFilter(c.mask));
   out.push(`pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black@0`, "setsar=1");
   const { l, t, r, b } = c.crop;
   if (l + t + r + b > EPS) {
@@ -355,6 +367,23 @@ function videoFilters(seg, { W, H, fps, next }) {
   out.push(...transformFilters(seg, { W, H, fps }));
   out.push(...fadeFilters(seg, { W, H, fps, next }));
   return out.join(",");
+}
+
+// A shape mask on the alpha of the fitted clip (before it's placed on the canvas).
+// M is 1 inside the shape, fading to 0 over `feather`.
+export function maskFilter({ type, x, y, w, h, feather, invert }) {
+  const fe = f(Math.max(0.005, feather));
+  // Offsets in clip halves; distances in the clip's short side, so a circle stays round.
+  const dx = `((X-W*${f(0.5 + x / 2)})/min(W,H))`;
+  const dy = `((Y-H*${f(0.5 + y / 2)})/min(W,H))`;
+  const d = {
+    circle: `hypot(${dx}/${f(w / 2)},${dy}/${f(h / 2)})`,
+    rectangle: `max(abs(${dx})/${f(w / 2)},abs(${dy})/${f(h / 2)})`,
+    mirror: `abs(${dy})/${f(h / 2)}`,
+  }[type];
+  // linear: everything above the line at y shows, softened over `feather`.
+  const m = type === "linear" ? `clip(0.5-${dy}/${fe},0,1)` : `clip((1-${d})/${fe},0,1)`;
+  return `geq=lum='lum(X,Y)':cb='cb(X,Y)':cr='cr(X,Y)':a='alpha(X,Y)*${invert ? `(1-${m})` : m}'`;
 }
 
 // Effects whose filters can be switched on for part of the timeline (needed

@@ -369,7 +369,7 @@ function cutSpan(x, a, b, ripple) {
 }
 
 const MERGE_KEYS = ["transform", "crop", "adjust", "chroma", "stabilize", "audio", "style", "color"];
-const SET_KEYS = ["volume", "fadeIn", "fadeOut", "muted", "opacity", "flipH", "flipV", "filter", "lut", "effects", "animIn", "animOut", "text", "speed", "videoDenoise", "label", ...MERGE_KEYS];
+const SET_KEYS = ["mask", "volume", "fadeIn", "fadeOut", "muted", "opacity", "flipH", "flipV", "filter", "lut", "effects", "animIn", "animOut", "text", "speed", "videoDenoise", "label", ...MERGE_KEYS];
 
 // Set clip properties. Objects listed in MERGE_KEYS merge into the existing
 // value. Changing speed keeps the clip's start.
@@ -594,6 +594,40 @@ export function removeMarkers(p, ids) {
 
 export function setCanvas(p, canvas) {
   return edit(p, (n) => Object.assign(n.canvas, canvas));
+}
+
+// Put audio derived from `mediaId` (separated stems, or each track of an OBS
+// recording) on new audio tracks, one per layer. Every clip that uses the
+// source gets a matching clip on each track (same position, trim and speed),
+// so cuts made earlier carry over; the source clips are muted.
+// layers: [{ info (probe result), name, role }]
+export function addAudioLayers(p, mediaId, layers) {
+  const sources = p.clips.filter((c) => c.mediaId === mediaId);
+  if (!sources.length) throw new Error("That media isn't on the timeline");
+  let project = p;
+  for (const layer of layers) {
+    const added = addMedia(project, layer.info);
+    const { project: withTrack, track } = addTrack(added.project, "audio", layer.name);
+    project = edit(withTrack, (n) => {
+      if (layer.role) trackById(n, track.id).role = layer.role;
+      for (const c of sources) {
+        n.clips.push({ id: uid("c"), trackId: track.id, mediaId: added.media.id, start: c.start, in: c.in, out: c.out, speed: c.speed, volume: c.volume, fadeIn: c.fadeIn, fadeOut: c.fadeOut });
+      }
+    });
+  }
+  return edit(project, (n) => {
+    for (const c of n.clips) if (c.mediaId === mediaId) c.muted = true;
+  });
+}
+
+// Fit the canvas to a video's size and frame rate, so a 1440p60 recording is
+// edited and exported as 1440p60 (done for the first clip of an empty project,
+// like CapCut's "Original" ratio).
+export function matchCanvas(p, mediaId) {
+  const m = mediaById(p, mediaId);
+  if (!m?.hasVideo || m.kind === "image" || !(m.width > 0 && m.height > 0)) return p;
+  const even = (x) => x - (x % 2);
+  return setCanvas(p, { width: even(m.width), height: even(m.height), fps: Math.min(60, Math.round(m.fps) || p.canvas.fps) });
 }
 
 export function setSettings(p, patch) {

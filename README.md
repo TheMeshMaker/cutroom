@@ -1,123 +1,95 @@
 # Cutroom
 
 A desktop video editor laid out like CapCut, so it feels familiar from the
-first minute. It runs fully offline, and your AI agent can edit the same
-project live.
+first minute. It's a native Windows app written in Rust (no browser or web
+view inside), it runs fully offline, it speaks nine languages (including
+Arabic and Urdu, right to left), and your AI agent can edit the same project
+live.
 
-**Familiar layout.** The library is top left (Media, Audio, Text, Effects,
-Transitions, Filters, Captions, Script), the player sits in the middle, and a
-tabbed properties panel is on the right (Video, Audio, Speed, Animation,
-Adjust). The timeline at the bottom has a magnetic main track and CapCut's tool
-row and shortcuts. Four page tabs (**Edit · Color · Audio · Deliver**) bring up
-the right tools for each job, and a **Projects** home lists your recent work.
+**Familiar layout.** The asset panel is top left (Media, Audio, Text,
+Stickers, Effects, Transitions, Captions, Filters, Adjustment), the player
+sits in the middle with a ratio menu, and a tabbed details panel is on the
+right (Video, Text, Audio, Speed, Animation, Color, or Project when nothing is
+selected). The timeline at the bottom has a magnetic main track, CapCut's tool
+row and its shortcuts. The app always opens on the **Projects** home.
 
-**Pro-level features, no subscription:**
+**What's inside:**
 
 - **Editing:** split, delete left/right of the playhead (Q/W), ripple delete,
-  copy/paste, blade tool, snapping, a main-track magnet, lockable/hideable
-  tracks, filmstrips and waveforms, undo/redo and autosave.
-- **Timeline that's easy to work in:**
-  - Drag on empty space to box-select clips (Shift/Ctrl adds), then drag any
-    of them to move the whole selection.
-  - Right-click a clip, track or empty spot for its actions: speed, reverse,
-    freeze, label color, delete, add a track…
-  - Select all (Ctrl+A), duplicate (Ctrl+D), copy/paste several clips with
-    their spacing kept, nudge by a frame (Alt+←/→).
-  - Snap guides while dragging, a time readout on the ruler, compact/normal/tall
-    tracks, track rename, and an Undo button on every delete.
-- **Speed and time:** constant speed 0.1–10× with pitch kept, reverse, and
-  freeze frame.
-- **Framing:** scale, position, rotation, flip, opacity and crop. Zoom and pan
-  keyframes, plus one-key punch-in zooms (P).
-- **Look:**
-  - 12 adjustment controls (exposure, temperature, tint, highlights/shadows,
-    vignette, grain…) and 12 filters.
-  - `.cube` LUT import.
-  - 12 effects, including camera shake, glow, VHS, RGB split and pixelate.
-- **Motion:** 22 transitions and 9 in/out animations (zoom, pop, slide, spin,
-  fade).
-- **Compositing:** picture-in-picture on extra video tracks, chroma key and
-  stabilization.
-- **Text:** 10 styles over 13 fonts, with stroke, box and shadow. Arabic
-  shaping and right-to-left text work.
-- **Auto captions:** local Whisper (faster-whisper large-v3). Captions follow
-  your cuts and nothing is uploaded.
+  copy/paste, duplicate, box selection and group moves, snapping, the
+  main-track magnet, lockable/hideable/mutable tracks, filmstrips and
+  waveforms, markers, undo/redo and autosave (with a backup every 5 minutes).
+- **Speed and time:** 0.1–10× with pitch kept, five speed curves (ramp up/down,
+  montage, hero moment, bullet time), reverse and freeze frame.
+- **Framing:** scale, position, rotation, mirror/flip, opacity, crop,
+  keyframes (diamonds on the clip), **masks** (circle, rectangle, linear, band;
+  position, size, feather, invert), green-screen removal and stabilization.
+- **Canvas:** aspect ratios (16:9, 9:16, 1:1, 4:3, 3:4, 21:9), 720p–4K,
+  24–60 fps, and a **canvas background** (black, blur or a color) around
+  footage that doesn't fill the frame.
+- **Look:** 12 filters and 12 effects whose tiles show *your* footage, 12
+  adjustment sliders, **color wheels** (shadows, midtones, highlights,
+  offset), a **tone curve** editor, `.cube` LUTs and adjustment layers.
+- **Motion:** 22 transitions and 9 in/out animations.
+- **Text:** a multi-line text box, 10 styles, 8 animated title templates, 13
+  fonts, color, outline, background box, shadow and alignment. Arabic text is
+  shaped and right-to-left.
+- **Stickers:** 42 color emoji and drawn stickers (arrow, highlight circle,
+  speech bubble, burst, subscribe button) on their own track.
+- **Captions:** auto captions with local Whisper (detect, Arabic or English),
+  `.srt`/`.vtt` import and `.srt` export.
 - **Audio:**
-  - Clean-up: noise reduction, voice enhance and loudness normalize.
-  - Voice changer (9 voices) and pitch shift.
-  - Beat detection, extract audio, fades and volume up to 400%.
-  - Bleeps (Shift+B).
-- **Find long pauses:** listens to your voice track and marks stalls so you
-  can review them before cutting.
-- **Export:** H.264, HEVC, AV1 or ProRes; 720p–4K; 24–60 fps. Uses
-  NVENC/Quick Sync/AMF when available. Includes a Shorts layout (square
-  gameplay panel over blurred footage) and a vertical crop.
-- **Exact preview:** when playback is paused, the player shows the real export
-  render of that frame.
-- **CapCut import:** opens your CapCut desktop drafts (clips, trims, volume,
-  fades, zoom keyframes).
-- **From Premiere Pro and DaVinci Resolve, made simple** (see
-  [docs/nle-findings.md](docs/nle-findings.md)):
-  - **Text-based editing:** transcribe once, then delete words in the Script
-    tab to cut them from the video; one click removes every "um" and "uh".
-  - **Color page:** Lift/Gamma/Gain/Offset wheels, a luma curve, live
-    waveform, RGB parade, vectorscope and histogram, Auto color, Match to
-    clip, copy/paste grade and a before/after toggle.
-  - **Audio page:** per-track faders, pan, mute/solo and meters; sound roles
-    (Dialogue, Music, SFX, Ambience); music that ducks under your voice; and
-    -14 LUFS loudness for YouTube.
-  - **Source monitor:** double-click a media item, set In/Out, then Insert
-    (`,`), Overwrite (`.`), Append or put it On top for B-roll.
-  - **Trim tools:** roll and slip, plus one-click "close all gaps".
-  - **Speed ramps:** ramp up, ramp down, montage, hero moment and bullet time.
-  - **Adjustment layers**, **scene cut detection** (split at every camera
-    cut) and **animated title templates** (lower third, chapter card,
-    subscribe, end card, Arabic title…).
-  - **Deliver page:** a render queue (YouTube, 4K, Shorts, vertical, ProRes
-    master) that also saves a matching `.srt`, YouTube chapters from markers
-    and a still-frame saver.
-  - **Subtitles:** save captions as `.srt` and import `.srt`/`.vtt` files.
-  - **Safety net:** a backup every 5 minutes (the last 30 are kept) and
-    Restore an earlier version.
-  - **Keyboard presets** for CapCut, Premiere Pro and DaVinci Resolve, and a
-    command palette (Ctrl+Shift+P) where you type what you want.
-- **Polished, themeable UI:** six accent colors (Menu → Theme color), tooltips
-  on every control, sliders you can drag by their label (double-click
-  resets), hover-scrub previews in the media library, a loop button,
-  safe-area/thirds guides on the player and a keyboard-shortcut sheet (`?`).
-- **Agent-native:** the project is readable JSON. The app live-reloads outside
+  - Volume up to 400%, fades, mute, voice enhance, noise reduction, loudness
+    normalize, pitch and 9 voice effects.
+  - **Voice, game and music separation** and **remove music**, on your GPU with
+    local models; nothing is uploaded.
+  - **OBS recordings:** each recorded audio track (game, mic, Discord…) onto
+    its own timeline track, with your cuts kept.
+  - Mark beats, extract audio, bleeps, and **read text aloud** with the
+    Windows voices on your PC.
+- **Live preview:** playback renders the same picture as the export, and edits
+  made while playing show up straight away.
+- **Export:** H.264, HEVC, AV1 or ProRes up to 4K60 with NVENC, tuned for
+  quality, plus a loudness target (YouTube −14 LUFS, TV −23).
+- **CapCut import:** opens your CapCut desktop drafts.
+- **Nine languages:** English, العربية, Español, Français, Deutsch, Türkçe,
+  Bahasa Indonesia, اردو and Português, picked from the menu at the top right
+  (the first start follows your Windows language). Everything is translated,
+  including error messages and default track names; Arabic and Urdu mirror the
+  whole layout right to left, and shortcuts follow the physical keys, so they
+  work with any keyboard layout.
+- **Agent-native:** the project is readable JSON. The app picks up outside
   edits, and the built-in MCP server lets Claude (or any MCP client) use every
   feature.
 
-See [docs/capcut-findings.md](docs/capcut-findings.md) for the architecture
-study behind the design. Cutroom uses none of CapCut's code, assets or
-branding.
-
-## Download
-
-Windows 10/11 x64 builds are on the
-[Releases](https://github.com/TheMeshMaker/cutroom/releases) page: an
-installer and a portable zip. FFmpeg is bundled, and the builds are currently
-early access and unsigned.
+Cutroom uses none of CapCut's code, assets or branding (see
+[docs/capcut-findings.md](docs/capcut-findings.md) for the study behind the
+layout).
 
 ## Run from source
 
-Requires Node.js 22+ and FFmpeg 7+ (`ffmpeg`/`ffprobe` on PATH, or set
-`CUTROOM_FFMPEG` / `CUTROOM_FFPROBE`). Auto captions need Python with
-`faster-whisper`. They run on the CPU, or on an NVIDIA GPU after
-`pip install nvidia-cublas-cu12 nvidia-cudnn-cu12`.
+Requires Rust (stable), Node.js 22+ for the MCP server and tests, and FFmpeg 7+
+(`vendor/ffmpeg/ffmpeg.exe` and `ffprobe.exe`, or `CUTROOM_FFMPEG` /
+`CUTROOM_FFPROBE`). Captions need Python with `faster-whisper`; voice/music
+separation needs the CDX23 models and a PyTorch environment
+(`CUTROOM_STEM_PYTHON`); stickers need Python with Pillow.
 
 ```bash
-npm install
-npm start          # build the UI and open the app
-npm run dev        # hot-reloading UI during development
-npm test           # core, feature and MCP tests (real FFmpeg renders)
-npm run dist       # Windows installer + portable zip in release/ (bundles vendor/ffmpeg)
+npm run dev        # build and open the app (debug)
+npm start          # optimized build
+npm test           # engine, feature and MCP tests (real FFmpeg renders)
+npm run shots      # screenshot checks of every panel, English and Arabic
+npm run dist       # release build in native/target/release
 ```
 
-`npm run dist` expects `ffmpeg.exe`, `ffprobe.exe` and their license files in
-`vendor/ffmpeg/` (not committed). The packaged app uses that bundled copy
-unless `CUTROOM_FFMPEG` / `CUTROOM_FFPROBE` are set.
+**Adding a language:** copy `native/i18n/es.json` to `native/i18n/<code>.json`,
+translate the values (keep `{0}`, `{1}`… as they are), add a line to
+`LANGUAGES` in `native/src/i18n.rs`, and run `npm test`: it fails if any
+string is missing.
+
+Handy flags for checks: `cutroom --project=<file> --lang=ar
+--do=a-filters,select,color --shot=out.png` opens off-screen, runs the steps
+and saves a screenshot; `cutroom --selftest=<media>` tests the embedded engine.
 
 ## Use it with Claude (MCP)
 
@@ -125,93 +97,49 @@ unless `CUTROOM_FFMPEG` / `CUTROOM_FFPROBE` are set.
 claude mcp add cutroom -s user -- node /absolute/path/to/cutroom/mcp/server.mjs
 ```
 
-Tools:
-
-- **Project:** `project_status`, `project_create`, `project_open`,
-  `settings_set` (magnet, loudness), `catalog_list`, `backups_list`,
-  `backup_restore`
-- **Media and clips:** `media_import`, `clip_add`, `clip_split`, `clip_trim`,
-  `clip_move`, `clip_delete`, `clips_move`, `clips_duplicate`, `clip_set`
-  (every clip property, including the color wheels, curve, video noise
-  reduction and color label)
-- **Pro features:** `text_add`, `title_add`, `transition_set`, `punch_in`,
-  `keyframes_clear`, `clip_reverse`, `clip_freeze`, `audio_extract`,
-  `captions_generate`, `captions_save`, `captions_import`, `beats_detect`
-- **Premiere/Resolve-style editing:** `source_place` (insert, overwrite,
-  append, on top), `roll_edit`, `clip_slip`, `speed_ramp`, `gaps_close`,
-  `scenes_split`, `adjustment_add`, `track_set` (fader, pan, solo, role,
-  ducking)
-- **Text-based editing:** `transcript_create`, `transcript_words`,
-  `words_remove` (by word or every filler)
-- **Cleanup:** `bleep_add`, `bleep_remove`, `ranges_cut`, `pauses_find`
-- **CapCut:** `capcut_list_drafts`, `capcut_import`
-- **Output:** `frame_render` (returns the frame as an image) and
-  `export_video` (codec, encoder, resolution, fps, layout)
-
-The server works on the project open in the app. Every edit shows up live and
-can be undone with Ctrl+Z.
+The server works on the project open in the app; every edit shows up live and
+can be undone with Ctrl+Z. It has 45 tools covering media and clips, text and
+titles, transitions, keyframes and punch-ins, reverse/freeze, captions,
+beats, speed ramps, roll/slip trims, adjustment layers, scene splitting,
+text-based editing (`transcript_create`, `words_remove`), bleeps, pause
+finding, CapCut import, frame rendering and export.
 
 ## Shortcuts
-
-Pick a preset under **Menu → Keyboard shortcuts**: CapCut (the default),
-Premiere Pro (Ctrl+K split, V/C/N/Y tools, S snap…) or DaVinci Resolve.
-Shortcuts follow the physical key, so they work with an Arabic layout too. The
-CapCut preset:
 
 | Key | Action |
 | --- | --- |
 | Space | Play / pause |
-| Ctrl+B | Split at playhead |
-| Q / W | Delete left / right of playhead |
+| Ctrl+B | Split at the playhead |
+| Q / W | Delete left / right of the playhead |
 | Del (Shift+Del) | Delete (ripple) |
-| A / B | Select tool / split tool |
-| Ctrl+C / Ctrl+V | Copy / paste clip at playhead |
-| N | Snapping on/off |
-| Ctrl + / Ctrl − / Shift+Z | Zoom in / out / fit timeline |
+| Ctrl+C / Ctrl+V / Ctrl+D | Copy / paste / duplicate |
+| Ctrl+A | Select all |
 | M | Marker |
-| I / O / X | Range in / out / clear |
-| P | Punch-in zoom |
-| Shift+B | Bleep |
 | ← → (Shift) | Step one frame (one second) |
-| Ctrl+Z / Ctrl+Shift+Z | Undo / redo |
+| Home / End | Start / end |
+| Ctrl + / Ctrl − / Shift+Z | Zoom in / out / fit timeline |
+| Ctrl+Z / Ctrl+Y | Undo / redo |
 | Ctrl+I / Ctrl+E | Import / export |
-| J / K / L | Back 5 s / pause / play |
-| , / . | Insert / overwrite from the source monitor |
-| Shift+M / Ctrl+Shift+M | Next / previous marker |
-| Ctrl+Shift+P | Command palette |
-| Ctrl+A / Ctrl+Shift+A | Select all / deselect |
-| Ctrl+D | Duplicate selection |
-| Alt+← / Alt+→ | Nudge selection one frame |
-| ? or F1 | Keyboard shortcut sheet |
 
 ## Project format
 
 ```jsonc
 {
   "format": "cutroom/1",
-  "settings": { "magnet": true, "loudness": -14 },
+  "settings": { "magnet": true, "loudness": -14, "background": "blur" },
   "canvas": { "width": 1920, "height": 1080, "fps": 30 },
-  "media":  [{ "id": "m_…", "path": "G:/Obs/rec.mkv", "duration": 1113.6, "hasAudio": true }],
-  "tracks": [{ "id": "t_…", "kind": "text" }, { "id": "v1", "kind": "video" },
-             { "id": "a1", "kind": "audio", "volume": 1, "pan": 0, "role": "music", "duck": { "enabled": true, "amount": 60 } }],
-  "clips":  [{ "id": "c_…", "trackId": "v1", "mediaId": "m_…",
-               "start": 0, "in": 628.2, "out": 630.03, "speed": 1,      // seconds
+  "media":  [{ "id": "m_…", "path": "G:/Obs/rec.mkv", "duration": 1113.6, "hasAudio": true, "audioTracks": ["Game", "Mic"] }],
+  "tracks": [{ "id": "t_…", "kind": "text" }, { "id": "v1", "kind": "video" }, { "id": "a1", "kind": "audio" }],
+  "clips":  [{ "id": "c_…", "trackId": "v1", "mediaId": "m_…", "start": 0, "in": 628.2, "out": 630.03, "speed": 1,
                "transform": { "scale": 1, "x": 0, "y": 0, "rotation": 0 },
                "keyframes": [{ "t": 0.75, "scale": 1.3, "x": 0, "y": 0, "ease": "smooth" }],
-               "adjust": { "contrast": 20 }, "filter": { "id": "horror", "intensity": 80 },
-               "effects": [{ "id": "shake", "intensity": 60 }],
-               "animIn": { "type": "zoom-in", "duration": 0.5 },
-               "transition": { "type": "dissolve", "duration": 0.5 },
-               "color": { "lift": { "x": 0, "y": 0.1, "l": 0 }, "gamma": { … }, "gain": { … }, "offset": { … },
-                          "curve": [[0, 0], [0.5, 0.55], [1, 1]] },
-               "audio": { "denoise": 40, "enhance": true, "voice": null, "pitch": 0, "normalize": false } },
-             { "id": "c_…", "trackId": "v2", "adjustment": true, "start": 10, "in": 0, "out": 5 },
-             { "id": "c_…", "trackId": "t_…", "text": "Hello", "style": { "font": "Segoe UI", "size": 72 },
-               "start": 2, "in": 0, "out": 3 }],
-  "bleeps":  [{ "start": 61.2, "end": 61.7 }],
-  "markers": [{ "time": 120.4, "end": 126.9, "label": "pause" }],
-  "transcripts": { "m_…": { "language": "en", "words": [{ "s": 1.2, "e": 1.5, "w": "Welcome" }] } },
-  "deliver": [{ "name": "Episode 3 Shorts", "preset": "shorts-square", "codec": "h264", "resolution": 1080 }]
+               "mask": { "type": "circle", "x": 0, "y": 0, "w": 0.6, "h": 0.6, "feather": 0.1, "invert": false },
+               "filter": { "id": "horror", "intensity": 80 }, "effects": [{ "id": "shake", "intensity": 60 }],
+               "color": { "lift": { "x": 0, "y": 0.1, "l": 0 }, "curve": [[0, 0], [0.5, 0.55], [1, 1]] },
+               "animIn": { "type": "zoom-in", "duration": 0.5 }, "transition": { "type": "dissolve", "duration": 0.5 },
+               "audio": { "denoise": 40, "enhance": true, "voice": null, "pitch": 0 } },
+             { "id": "c_…", "trackId": "t_…", "text": "Hello", "style": { "font": "Segoe UI", "size": 72 }, "start": 2, "in": 0, "out": 3 }],
+  "markers": [{ "time": 120.4, "label": "beat" }]
 }
 ```
 
@@ -220,5 +148,11 @@ is the main track), then audio.
 
 ## Not yet
 
-Free-form speed curves, masks and tracking, multicam, Auto Reframe, node
-compositing, AI background removal and text-to-speech.
+- **Online CapCut content** can't be copied: the stock music and sound
+  library, store templates, AI avatars and online effects.
+- **From the old web version, not in the native app yet** (the engine and MCP
+  server still have them): the Script tab (text-based editing), the audio
+  mixer page, the source monitor, the Deliver render queue, video scopes,
+  keyboard presets and the command palette.
+- Motion tracking, blend modes, auto reframe, AI background removal,
+  multicam, and an installer for the native build.

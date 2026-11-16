@@ -62,9 +62,8 @@ row and its shortcuts. The app always opens on the **Projects** home.
   edits, and the built-in MCP server lets Claude (or any MCP client) use every
   feature.
 
-Cutroom uses none of CapCut's code, assets or branding (see
-[docs/capcut-findings.md](docs/capcut-findings.md) for the study behind the
-layout).
+Cutroom uses none of CapCut's code, assets or branding; only the general
+layout is familiar.
 
 ## Run from source
 

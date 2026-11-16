@@ -14,7 +14,7 @@ use crate::model::{timecode, Clip, Track};
 use crate::theme::*;
 use crate::Message;
 
-pub const HEADER: f32 = 156.0;
+pub const HEADER: f32 = 176.0;
 pub const RULER: f32 = 28.0;
 const EDGE: f32 = 7.0;
 const SNAP_PX: f32 = 8.0;
@@ -378,7 +378,7 @@ impl Program<Message> for Timeline<'_> {
             let name = if row.main { crate::i18n::t(self.ed.lang, "Main").to_string() } else { crate::i18n::message(self.ed.lang, &row.track.name) };
             // Shortened with "…" so long names (other languages) stop before the header icons.
             let room = HEADER - 46.0 - 24.0 * header_flags(row.track).len() as f32;
-            let max_chars = (room / 6.6).max(3.0) as usize;
+            let max_chars = (room / 5.8).max(3.0) as usize;
             let name = if name.chars().count() > max_chars { format!("{}…", name.chars().take(max_chars - 1).collect::<String>()) } else { name };
             f.fill_text(label(name, Point::new(40.0, cy - 8.0), if row.main { TEXT } else { TEXT2 }, 12.0));
             for (i, flag) in header_flags(row.track).iter().enumerate() {

@@ -45,7 +45,7 @@ pub fn panel<'a>(app: &'a App, ed: &'a Editor) -> Element<'a, Message> {
         }
     };
     container(column![container(tabs).padding([6, 8]).width(Fill).style(theme::bar), scrollable(container(body).padding(Padding { top: 12.0, right: 18.0, bottom: 16.0, left: 14.0 })).height(Fill)])
-        .width(370)
+        .width((app.window.width * 0.23).clamp(290.0, 380.0))
         .height(Fill)
         .style(theme::panel)
         .into()
@@ -565,6 +565,7 @@ fn project<'a>(app: &'a App, ed: &'a Editor) -> Element<'a, Message> {
         section(lang, t(lang, "Resolution"), vec![sizes]),
         section(lang, t(lang, "Frame rate"), vec![fps]),
         section(lang, t(lang, "Loudness on export"), vec![loudness]),
+        section(lang, t(lang, "Interface size"), vec![super::size_menu(app)]),
         section(lang, t(lang, "Timeline"), vec![
             toggle(lang, t(lang, "Main track magnet"), ed.p.settings.magnet, Message::Magnet),
             btn("\u{E9A6}", t(lang, "Close all gaps"), Btn::Normal, Some(Message::Op("closeGaps", vec![], None))).width(Fill).into(),

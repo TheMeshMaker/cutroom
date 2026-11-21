@@ -40,10 +40,14 @@ fn main() -> iced::Result {
         .subscription(App::subscription)
         .theme(|_: &App| theme::theme())
         .default_font(iced::Font::with_name("Segoe UI"))
+        // The interface follows the screen: smaller on small or highly scaled screens (FHD at 150 %).
+        .scale_factor(App::ui_scale)
         .window(iced::window::Settings {
             // `--shot-size=1600x2400` takes tall screenshots for checks (whole panels at once).
-            size: arg("--shot-size=").and_then(|s| s.split_once('x').and_then(|(w, h)| Some(Size::new(w.parse().ok()?, h.parse().ok()?)))).unwrap_or(Size::new(1600.0, 960.0)),
-            min_size: Some(Size::new(1200.0, 720.0)),
+            size: arg("--shot-size=").and_then(|s| s.split_once('x').and_then(|(w, h)| Some(Size::new(w.parse().ok()?, h.parse().ok()?)))).unwrap_or(Size::new(1280.0, 800.0)),
+            // Opens filling the screen, whatever its resolution; small enough to restore on an HD laptop.
+            maximized: arg("--shot=").is_none(),
+            min_size: Some(Size::new(900.0, 560.0)),
             // Screenshot checks run off-screen so they don't pop up over whatever you're doing.
             position: if arg("--shot=").is_some() { iced::window::Position::Specific(iced::Point::new(-4200.0, 40.0)) } else { iced::window::Position::Centered },
             ..Default::default()
@@ -86,6 +90,10 @@ pub struct App {
     /// Windows text-to-speech voices ("Name|culture" names), loaded at start.
     pub voices: Vec<String>,
     pub voice: Option<String>,
+    /// Interface size: the user's choice, else fitted to the monitor (1.0 on a big screen).
+    pub ui_manual: Option<f32>,
+    pub ui_auto: f32,
+    monitor_known: bool,
     /// `--shot=<png>`: save a screenshot of the window after a few seconds and quit (for checks).
     shot: Option<Instant>,
     /// `--do=play,audio,…`: messages sent once the editor has loaded (for checks).
@@ -207,6 +215,8 @@ pub enum Message {
     FlowDone(Result<Value, String>),
     Looks(String, Result<Value, String>),
     CancelFlow,
+    Monitor(Option<Size>),
+    UiScale(Option<f32>),
     CopyLook,
     PasteLook,
     RatioPick(f64, f64),
@@ -225,6 +235,29 @@ pub enum Message {
     Zoom(f32),
     Fit,
     Magnet(bool),
+}
+
+/// The interface scale that fits a screen of `w` x `h` (in Windows' scaled pixels):
+/// the layout is designed for about 1600 x 900, so anything smaller shrinks to fit.
+fn fit_scale(w: f32, h: f32) -> f32 {
+    (w / 1600.0).min(h / 900.0).clamp(0.6, 1.0)
+}
+
+#[cfg(test)]
+mod scale_tests {
+    use super::fit_scale;
+
+    #[test]
+    fn fits_common_screens() {
+        // Screen size as Windows reports it (resolution / display scaling).
+        assert_eq!(fit_scale(1920.0, 1080.0), 1.0); // FHD at 100 %
+        assert!((fit_scale(1536.0, 864.0) - 0.96).abs() < 0.01); // FHD at 125 %
+        assert!((fit_scale(1280.0, 720.0) - 0.8).abs() < 0.01); // FHD at 150 %
+        assert!((fit_scale(1366.0, 768.0) - 0.8533).abs() < 0.01); // HD laptop
+        assert_eq!(fit_scale(2560.0, 1440.0), 1.0); // QHD, or 4K at 150 %
+        assert_eq!(fit_scale(3840.0, 2160.0), 1.0); // 4K at 100 %
+        assert_eq!(fit_scale(800.0, 450.0), 0.6); // never unreadably small
+    }
 }
 
 /// What the asset and details panels offer, read once from the engine's catalog.
@@ -300,7 +333,7 @@ impl App {
         let jobs = Jobs { tools: tools.clone(), progress: Arc::default(), cancels: Arc::default() };
         let catalog = Catalog::load(&engine);
         let voices_job = jobs.spawn("voices", |e| e.call("flows.voices", &json!([]), false), Message::Voices);
-        let mut app = App { tools, engine: Rc::new(engine), jobs, lang, catalog, voices: Vec::new(), voice: None, screen: Screen::Home, cards: Vec::new(), thumbs: HashMap::new(), toast: None, window: Size::new(1600.0, 960.0), shot: arg("--shot=").map(|_| Instant::now()), script: arg("--do=").map(|s| (Instant::now(), s.split('|').map(|batch| batch.split(',').filter_map(scripted).collect()).collect())) };
+        let mut app = App { tools, engine: Rc::new(engine), jobs, lang, catalog, voices: Vec::new(), voice: None, ui_manual: store::read_state()["uiScale"].as_f64().map(|v| (v as f32).clamp(0.5, 2.0)), ui_auto: 1.0, monitor_known: false, screen: Screen::Home, cards: Vec::new(), thumbs: HashMap::new(), toast: None, window: Size::new(1600.0, 960.0), shot: arg("--shot=").map(|_| Instant::now()), script: arg("--do=").map(|s| (Instant::now(), s.split('|').map(|batch| batch.split(',').filter_map(scripted).collect()).collect())) };
         if let Some(code) = arg("--lang=") {
             app.lang = Lang::from_code(&code);
         }
@@ -317,6 +350,10 @@ impl App {
             Screen::Editor(ed) => format!("{} - Cutroom", ed.p.name),
             Screen::Home => "Cutroom".into(),
         }
+    }
+
+    pub fn ui_scale(&self) -> f32 {
+        self.ui_manual.unwrap_or(self.ui_auto)
     }
 
     fn notify(&mut self, text: impl Into<String>, undo: bool) {
@@ -433,7 +470,32 @@ impl App {
                 img.save(&path).map_err(|e| e.to_string())?;
                 return Ok(iced::exit());
             }
-            Message::Event(iced::Event::Window(iced::window::Event::Resized(size))) => self.window = size,
+            Message::Event(iced::Event::Window(iced::window::Event::Resized(size))) => {
+                self.window = size;
+                // Measure the screen once the window exists.
+                if !self.monitor_known {
+                    self.monitor_known = true;
+                    return Ok(iced::window::latest().and_then(iced::window::monitor_size).map(Message::Monitor));
+                }
+            }
+            // Moved (maybe to another screen, same scaling or not): fit again.
+            Message::Event(iced::Event::Window(iced::window::Event::Rescaled(_) | iced::window::Event::Moved(_))) => {
+                return Ok(iced::window::latest().and_then(iced::window::monitor_size).map(Message::Monitor));
+            }
+            Message::Monitor(Some(size)) => {
+                // iced reports the screen divided by our own scale; undo that to get it as Windows sees it.
+                let (w, h) = (size.width * self.ui_scale(), size.height * self.ui_scale());
+                // `--screen=1280x720` pretends to be another screen (for checks).
+                let (w, h) = arg("--screen=").and_then(|s| s.split_once('x').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?)))).unwrap_or((w, h));
+                self.ui_auto = fit_scale(w, h);
+            }
+            Message::Monitor(None) => {}
+            Message::UiScale(choice) => {
+                self.ui_manual = choice;
+                if arg("--shot=").is_none() {
+                    store::write_state(json!({ "uiScale": choice }));
+                }
+            }
             Message::Event(iced::Event::Mouse(iced::mouse::Event::ButtonReleased(_))) => {
                 if let Some(ed) = self.ed() {
                     ed.drag_media = None;

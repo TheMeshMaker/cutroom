@@ -58,6 +58,10 @@ row and its shortcuts. The app always opens on the **Projects** home.
   including error messages and default track names; Arabic and Urdu mirror the
   whole layout right to left, and shortcuts follow the physical keys, so they
   work with any keyboard layout.
+- **Any screen:** opens maximized and sizes itself to the monitor, from an HD
+  laptop to 4K, with any Windows display scaling; re-fits when you move it to
+  another monitor. An **Interface size** menu (Auto, 70–150%) sits next to the
+  language.
 - **Agent-native:** the project is readable JSON. The app picks up outside
   edits, and the built-in MCP server lets Claude (or any MCP client) use every
   feature.

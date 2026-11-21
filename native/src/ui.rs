@@ -66,6 +66,25 @@ pub fn ratio_size(cv: &crate::model::Canvas, w: f64, h: f64) -> (u32, u32) {
 
 const RATIOS: [(&str, f64, f64); 6] = [("16:9", 16.0, 9.0), ("9:16", 9.0, 16.0), ("1:1", 1.0, 1.0), ("4:3", 4.0, 3.0), ("3:4", 3.0, 4.0), ("21:9", 21.0, 9.0)];
 
+/// Interface size: Auto (fits the screen) or a fixed size.
+fn size_menu<'a>(app: &App) -> Element<'a, Message> {
+    let auto = crate::i18n::fill(t(app.lang, "Auto ({0})"), &[format!("{:.0}%", app.ui_auto * 100.0)]);
+    let mut options = vec![auto.clone()];
+    options.extend([70, 80, 90, 100, 110, 125, 150].map(|p| format!("{p}%")));
+    let current = app.ui_manual.map_or(auto, |s| format!("{:.0}%", s * 100.0));
+    row![
+        icon("\u{E8A3}").size(14).color(theme::TEXT2),
+        iced::widget::pick_list(options, Some(current), |o: String| Message::UiScale(o.strip_suffix('%').and_then(|p| p.parse::<f32>().ok()).map(|p| p / 100.0)))
+            .text_size(13)
+            .padding([5, 10])
+            .style(theme::pick)
+            .menu_style(theme::pick_menu),
+    ]
+    .spacing(8)
+    .align_y(iced::Center)
+    .into()
+}
+
 /// The language menu (top right): every language by its own name.
 fn language_menu<'a>(lang: Lang) -> Element<'a, Message> {
     row![
@@ -113,7 +132,7 @@ fn home(app: &App) -> Element<'_, Message> {
         vec![
             row![container(text("▶").size(12).color(theme::ACCENT_INK)).padding([2, 6]).style(|_: &iced::Theme| container::Style { background: Some(theme::ACCENT.into()), border: iced::Border { radius: 6.0.into(), ..Default::default() }, ..Default::default() }), text("Cutroom").size(18)].spacing(10).align_y(iced::Center).into(),
             space::horizontal().into(),
-            language_menu(lang),
+            row![iced::widget::tooltip(size_menu(app), container(text(t(lang, "Interface size")).size(12)).padding([5, 9]).style(theme::menu), iced::widget::tooltip::Position::Bottom), language_menu(lang)].spacing(16).align_y(iced::Center).into(),
         ],
     )
     .align_y(iced::Center);

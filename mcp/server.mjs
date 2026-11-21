@@ -24,7 +24,7 @@ import { detectScenes, detectSilence, FFMPEG, media, probe, run } from "../node/
 import { listBackups, loadProject, PROJECT_EXT, readState, restoreBackup, saveProject, writeState } from "../node/store.js";
 
 const CAPCUT_DRAFTS = join(process.env.LOCALAPPDATA ?? homedir(), "CapCut", "User Data", "Projects", "com.lveditor.draft");
-const server = new McpServer({ name: "cutroom", version: "0.5.0" });
+const server = new McpServer({ name: "cutroom", version: "0.5.1" });
 const flows = createFlows(nodeHost, media, python, { renderFrame });
 
 let currentPath = process.env.CUTROOM_PROJECT ?? null;

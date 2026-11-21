@@ -1,6 +1,6 @@
 {
   "name": "cutroom",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "A CapCut-style desktop video editor: a native Rust app (iced, no web view) with local AI audio tools and a built-in MCP server.",
   "author": "TheMeshMaker",

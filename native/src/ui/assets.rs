@@ -54,7 +54,7 @@ pub fn panel<'a>(app: &'a App, ed: &'a Editor) -> Element<'a, Message> {
         Asset::Stickers => stickers(app, ed),
     };
     container(column![container(tabs).padding([6, 6]).style(theme::bar), container(scrollable(container(body).padding([12, 14])).height(Fill)).height(Fill)])
-        .width(450)
+        .width((app.window.width * 0.27).clamp(300.0, 450.0))
         .height(Fill)
         .style(theme::panel)
         .into()
